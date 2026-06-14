@@ -151,18 +151,43 @@ class SnmpClient
 
     /**
      * Normalise a raw SNMP value: strip surrounding quotes, trim, and convert
-     * non-printable octet strings (MACs / serials returned as Hex-STRING) to a
-     * clean uppercase hex representation.
+     * true binary blobs (MACs, serials) to uppercase hex. Textual OCTET STRINGs
+     * such as sysDescr often include trailing nulls — those stay readable text.
      */
     private function cleanValue(string $value): string
     {
         $value = trim($value, " \t\n\r\0\x0B\"");
 
-        // If the string holds non-printable bytes, treat it as binary hex.
-        if ($value !== '' && ! ctype_print($value)) {
-            return strtoupper(bin2hex($value));
+        if ($value === '') {
+            return '';
         }
 
-        return $value;
+        if (ctype_print($value)) {
+            return $value;
+        }
+
+        // sysDescr/sysName frequently include null or control bytes on BDCOM/Huawei gear.
+        $text = preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/', '', $value) ?? $value;
+        $text = trim($text);
+
+        if ($text !== '' && ctype_print($text)) {
+            return $text;
+        }
+
+        // Some builds already return an uppercase hex encoding of ASCII text.
+        if (preg_match('/^[0-9A-Fa-f]+$/', $value) && strlen($value) % 2 === 0) {
+            $decoded = hex2bin($value);
+
+            if ($decoded !== false) {
+                $fromHex = preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/', '', $decoded) ?? $decoded;
+                $fromHex = trim($fromHex);
+
+                if ($fromHex !== '' && ctype_print($fromHex)) {
+                    return $fromHex;
+                }
+            }
+        }
+
+        return strtoupper(bin2hex($value));
     }
 }

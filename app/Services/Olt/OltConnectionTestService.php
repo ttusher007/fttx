@@ -27,7 +27,9 @@ class OltConnectionTestService
         if (! extension_loaded('snmp')) {
             return [
                 'success' => false,
-                'message' => 'The PHP SNMP extension is not installed or enabled on this server.',
+                'message' => 'The PHP SNMP extension is not installed or enabled on this server. '
+                    .'On Ubuntu/Debian run: sudo apt install php8.3-snmp && sudo systemctl restart php8.3-fpm. '
+                    .'Then verify with: php -m | grep snmp',
             ];
         }
 

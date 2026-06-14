@@ -42,7 +42,7 @@ class Login extends Component
 
         request()->session()->regenerate();
 
-        return $this->redirectIntended(route('dashboard'), navigate: true);
+        return $this->redirectIntended(route('dashboard'));
     }
 
     public function render()

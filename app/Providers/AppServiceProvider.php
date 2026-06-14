@@ -8,6 +8,7 @@ use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\RateLimiter;
+use Illuminate\Support\Facades\URL;
 use Illuminate\Support\ServiceProvider;
 
 class AppServiceProvider extends ServiceProvider
@@ -19,8 +20,32 @@ class AppServiceProvider extends ServiceProvider
 
     public function boot(): void
     {
+        $this->configureUrls();
         $this->registerApiRateLimiter();
         $this->registerGate();
+    }
+
+    /**
+     * Align generated URLs (routes, assets, Livewire) with APP_URL.
+     * Required when the app is served from a subdirectory such as /fttx/public.
+     */
+    private function configureUrls(): void
+    {
+        $appUrl = config('app.url');
+
+        if (! is_string($appUrl) || $appUrl === '') {
+            return;
+        }
+
+        URL::forceRootUrl(rtrim($appUrl, '/'));
+
+        if (str_starts_with($appUrl, 'https://')) {
+            URL::forceScheme('https');
+
+            if (config('session.secure') === null) {
+                config(['session.secure' => true]);
+            }
+        }
     }
 
     /**

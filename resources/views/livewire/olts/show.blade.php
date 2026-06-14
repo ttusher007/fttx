@@ -1,4 +1,4 @@
-<div class="space-y-5" @if($olt->last_sync_status === null) wire:poll.10s @endif>
+<div class="space-y-5" @if($activeSyncLog) wire:poll.3s="pollSyncProgress" @endif>
     {{-- Header --}}
     <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div class="flex items-center gap-3">
@@ -22,9 +22,10 @@
                 <span wire:loading wire:target="testConnection">Testing…</span>
             </button>
             @can('olt.sync')
-                <button wire:click="sync" wire:loading.attr="disabled" class="btn-primary">
+                <button wire:click="sync" wire:loading.attr="disabled" wire:target="sync" class="btn-primary">
                     <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" wire:loading.class="animate-spin" wire:target="sync"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
-                    Sync now
+                    <span wire:loading.remove wire:target="sync">Sync now</span>
+                    <span wire:loading wire:target="sync">Syncing…</span>
                 </button>
             @endcan
         </div>
@@ -40,12 +41,69 @@
         </div>
     @endif
 
+    {{-- Sync progress --}}
+    <div wire:loading wire:target="sync" class="card border-indigo-200 bg-indigo-50 p-4">
+        <div class="flex items-start gap-3">
+            <svg class="mt-0.5 h-5 w-5 shrink-0 animate-spin text-indigo-600" fill="none" viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+            </svg>
+            <div class="min-w-0 flex-1">
+                <p class="font-medium text-indigo-900">Sync in progress</p>
+                <p class="mt-1 text-sm text-indigo-700">{{ $syncProgressMessage ?: 'Starting sync…' }}</p>
+                <ol class="mt-3 space-y-1.5 text-xs text-indigo-800">
+                    <li>1. Connect via SNMP</li>
+                    <li>2. Read system info</li>
+                    <li>3. Fetch PON ports</li>
+                    <li>4. Fetch ONUs (may take 1–2 min on large OLTs)</li>
+                    <li>5. Save to database</li>
+                </ol>
+            </div>
+        </div>
+    </div>
+
+    @if ($syncResult)
+        <div @class([
+            'rounded-lg border px-4 py-3 text-sm',
+            'border-emerald-200 bg-emerald-50 text-emerald-800' => $syncResult['success'],
+            'border-red-200 bg-red-50 text-red-800' => ! $syncResult['success'],
+        ])>
+            <p class="font-medium">{{ $syncResult['success'] ? 'Sync completed' : 'Sync failed' }}</p>
+            <p class="mt-1">{{ $syncResult['message'] }}</p>
+            @if (! empty($syncResult['stats']))
+                <p class="mt-2 text-xs opacity-90">
+                    {{ $syncResult['stats']['ports'] ?? 0 }} ports ·
+                    {{ $syncResult['stats']['onus'] ?? 0 }} ONUs ·
+                    {{ $syncResult['stats']['online'] ?? 0 }} online
+                    @if (! empty($syncResult['duration_ms']))
+                        · {{ $syncResult['duration_ms'] }} ms
+                    @endif
+                </p>
+            @endif
+        </div>
+    @elseif ($activeSyncLog)
+        <div class="card border-blue-200 bg-blue-50 p-4 text-sm text-blue-800">
+            <div class="flex items-center gap-2">
+                <svg class="h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+                </svg>
+                <span class="font-medium">Background sync running</span>
+            </div>
+            <p class="mt-1">{{ $activeSyncLog->message ?: 'Sync in progress…' }}</p>
+            <p class="mt-1 text-xs text-blue-700">Started {{ $activeSyncLog->started_at?->diffForHumans() }}</p>
+        </div>
+    @endif
+
     {{-- Sync status line --}}
     <div class="card flex flex-col gap-1 p-4 text-sm sm:flex-row sm:items-center sm:justify-between">
         <span class="text-slate-500">
             Last sync:
             <span class="font-medium text-slate-700">{{ $olt->last_synced_at?->diffForHumans() ?? 'never' }}</span>
             @if ($olt->last_sync_duration_ms) · {{ $olt->last_sync_duration_ms }} ms @endif
+            @if ($olt->last_sync_status)
+                · <x-badge :color="match($olt->last_sync_status) { 'success' => 'emerald', 'failed' => 'red', 'partial' => 'amber', default => 'slate' }">{{ ucfirst($olt->last_sync_status) }}</x-badge>
+            @endif
         </span>
         <span class="text-slate-500">{{ $olt->last_sync_message }}</span>
     </div>

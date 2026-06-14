@@ -40,14 +40,22 @@ class OltSyncService
         $driver = $this->drivers->for($olt);
 
         try {
+            $this->progress($log, 'Connecting via SNMP…');
+
             if (! $olt->shouldSimulate() && ! $driver->probe($olt)) {
                 return $this->finish($olt, $log, SyncStatus::Failed, 'OLT unreachable via SNMP.', [], $startedAt);
             }
 
+            $this->progress($log, 'Fetching system information…');
             $system = $driver->fetchSystem($olt);
+
+            $this->progress($log, 'Fetching PON ports…');
             $ports = $driver->fetchPorts($olt);
+
+            $this->progress($log, 'Fetching ONUs (this may take a minute)…');
             $onus = $driver->fetchOnus($olt);
 
+            $this->progress($log, 'Saving ports and ONUs to database…');
             DB::transaction(function () use ($olt, $ports, $onus, $system) {
                 $portMap = $this->upsertPorts($olt, $ports);
                 $this->upsertOnus($olt, $onus, $portMap);
@@ -235,6 +243,11 @@ class OltSyncService
         $descr = $system->description ?? null;
 
         return $descr ? mb_substr($descr, 0, 120) : null;
+    }
+
+    private function progress(SyncLog $log, string $message): void
+    {
+        $log->update(['message' => $message]);
     }
 
     private function finish(Olt $olt, SyncLog $log, SyncStatus $status, string $message, array $stats, float $startedAt, bool $refreshOlt = true): SyncLog

@@ -8,7 +8,6 @@ use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\RateLimiter;
-use Illuminate\Support\Facades\URL;
 use Illuminate\Support\ServiceProvider;
 
 class AppServiceProvider extends ServiceProvider
@@ -20,31 +19,8 @@ class AppServiceProvider extends ServiceProvider
 
     public function boot(): void
     {
-        $this->configureProductionUrl();
         $this->registerApiRateLimiter();
         $this->registerGate();
-    }
-
-    /**
-     * Keep generated URLs aligned with APP_URL (critical for Livewire CSRF/session).
-     */
-    private function configureProductionUrl(): void
-    {
-        if ($this->app->runningInConsole()) {
-            return;
-        }
-
-        $appUrl = config('app.url');
-
-        if (! is_string($appUrl) || $appUrl === '') {
-            return;
-        }
-
-        URL::forceRootUrl($appUrl);
-
-        if (str_starts_with($appUrl, 'https://')) {
-            URL::forceScheme('https');
-        }
     }
 
     /**

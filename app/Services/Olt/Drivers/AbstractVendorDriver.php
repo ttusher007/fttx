@@ -237,7 +237,8 @@ abstract class AbstractVendorDriver implements VendorDriver
 
     protected function looksLikePonPort(?string $name): bool
     {
-        if (! $name) {
+        if (! $name || str_contains($name, ':')) {
+            // Skip ONU sub-interfaces such as GPON0/8:5 or EPON0/1:17.
             return false;
         }
 

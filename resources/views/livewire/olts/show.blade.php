@@ -110,7 +110,7 @@
 
     {{-- Stats --}}
     <div class="grid grid-cols-2 gap-4 lg:grid-cols-4">
-        <x-stat label="PON Ports" :value="$olt->port_count" tone="indigo" icon="olt" />
+        <x-stat label="PON Ports" :value="$activePortCount" tone="indigo" icon="olt" />
         <x-stat label="Total ONUs" :value="number_format($olt->onu_count)" tone="blue" icon="onu" />
         <x-stat label="Online" :value="number_format($olt->onu_online_count)" tone="emerald" icon="check" />
         <x-stat label="Offline" :value="number_format($olt->onu_offline_count)" tone="red" icon="alert" />

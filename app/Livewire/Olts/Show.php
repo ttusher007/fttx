@@ -111,10 +111,13 @@ class Show extends Component
             ->latest('id')
             ->first();
 
+        $ports = $this->olt->ports()->where('onu_count', '>', 0)->orderBy('port_index')->get();
+
         return view('livewire.olts.show', [
             'onus' => $onus,
-            'ports' => $this->olt->ports()->orderBy('port_index')->get(),
+            'ports' => $ports,
             'activeSyncLog' => $activeSyncLog,
+            'activePortCount' => $ports->count(),
         ]);
     }
 

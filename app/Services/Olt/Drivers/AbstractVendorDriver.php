@@ -115,13 +115,14 @@ abstract class AbstractVendorDriver implements VendorDriver
 
         $client = SnmpClient::forOlt($olt);
 
-        $serials = isset($oids['serial']) ? $client->walk($oids['serial']) : [];
-        $status = isset($oids['run_status']) ? $client->walk($oids['run_status']) : [];
-        $rx = isset($oids['rx_power']) ? $client->walk($oids['rx_power']) : [];
-        $tx = isset($oids['tx_power']) ? $client->walk($oids['tx_power']) : [];
-        $dist = isset($oids['distance']) ? $client->walk($oids['distance']) : [];
-        $mac = isset($oids['mac']) ? $client->walk($oids['mac']) : [];
-        $desc = isset($oids['description']) ? $client->walk($oids['description']) : [];
+        $serials  = isset($oids['serial'])       ? $client->walk($oids['serial'])       : [];
+        $status   = isset($oids['run_status'])   ? $client->walk($oids['run_status'])   : [];
+        $rx       = isset($oids['rx_power'])     ? $client->walk($oids['rx_power'])     : [];
+        $tx       = isset($oids['tx_power'])     ? $client->walk($oids['tx_power'])     : [];
+        $dist     = isset($oids['distance'])     ? $client->walk($oids['distance'])     : [];
+        $mac      = isset($oids['mac'])          ? $client->walk($oids['mac'])          : [];
+        $desc     = isset($oids['description'])  ? $client->walk($oids['description'])  : [];
+        $uptimes  = isset($oids['online_since']) ? $client->walk($oids['online_since']) : [];
 
         $client->close();
 
@@ -130,8 +131,18 @@ abstract class AbstractVendorDriver implements VendorDriver
             array_keys($serials), array_keys($status), array_keys($rx)
         ));
 
+        $uptimeUnit = $this->config()['uptime_unit'] ?? 'seconds';
+        $now = now();
         $onus = [];
         foreach ($indexes as $index) {
+            $onlineSince = null;
+            $rawUptime = $uptimes[$index] ?? null;
+            if ($rawUptime !== null && is_numeric($rawUptime) && (int) $rawUptime > 0) {
+                $onlineSince = $uptimeUnit === 'minutes'
+                    ? $now->copy()->subMinutes((int) $rawUptime)
+                    : $now->copy()->subSeconds((int) $rawUptime);
+            }
+
             $onus[] = new OnuInfo(
                 onuIndex: (string) $index,
                 portIndex: $this->derivePortIndex((string) $index),
@@ -142,6 +153,7 @@ abstract class AbstractVendorDriver implements VendorDriver
                 rxPower: $this->parsePower($rx[$index] ?? null),
                 txPower: $this->parsePower($tx[$index] ?? null),
                 distance: isset($dist[$index]) ? (float) $dist[$index] : null,
+                onlineSince: $onlineSince,
             );
         }
 

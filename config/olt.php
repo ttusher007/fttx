@@ -103,13 +103,18 @@ return [
             'driver' => BdcomDriver::class,
             'power_divisor' => 10,
             'distance_unit' => 'm',
+            // GP3600-08 optical col.5 returns ONU uptime in minutes (not seconds).
+            'uptime_unit' => 'minutes',
             'oids' => [
-                // GP3600 GPON (tested GP3600-08). EPON/P3310 use 3320.101.10.* — change if needed.
-                'run_status' => '1.3.6.1.4.1.3320.10.3.3.1.4',
-                'serial' => '1.3.6.1.4.1.3320.10.3.3.1.5',
-                'description' => '1.3.6.1.2.1.31.1.1.1.18',
-                'rx_power' => '1.3.6.1.4.1.3320.10.3.4.1.2',
-                'tx_power' => '1.3.6.1.4.1.3320.10.3.4.1.3',
+                // GP3600 GPON (confirmed against GP3600-08 via snmpwalk).
+                'run_status'   => '1.3.6.1.4.1.3320.10.3.3.1.4',
+                'serial'       => '1.3.6.1.4.1.3320.10.3.3.1.2',  // GPON serial — format "HWTC:XXXXXXXX"
+                'description'  => '1.3.6.1.2.1.31.1.1.1.18',
+                'rx_power'     => '1.3.6.1.4.1.3320.10.3.4.1.2',
+                'tx_power'     => '1.3.6.1.4.1.3320.10.3.4.1.3',
+                'distance'     => '1.3.6.1.4.1.3320.10.3.4.1.4',
+                'online_since' => '1.3.6.1.4.1.3320.10.3.4.1.5',  // ONU uptime in minutes (optical table col.5)
+                // No Ethernet/CPE MAC exposed via SNMP on GP3600-08.
                 // Legacy EPON tree (P3310/P3608 etc.):
                 // 'run_status' => '1.3.6.1.4.1.3320.101.10.1.1.26',
                 // 'serial' => '1.3.6.1.4.1.3320.101.10.1.1.3',

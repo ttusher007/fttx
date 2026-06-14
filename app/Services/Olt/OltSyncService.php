@@ -188,10 +188,16 @@ class OltSyncService
 
         $onlineSince = null;
         if ($isOnline) {
-            $prevOnline = $prev && ($prev['status'] ?? null) === OnuStatus::Online;
-            $onlineSince = $prevOnline && ! empty($prev['online_since'])
-                ? Carbon::parse($prev['online_since'])
-                : ($info->onlineSince ?? $now);
+            if ($info->onlineSince !== null) {
+                // OLT reports actual uptime — use it directly (resets on reconnection).
+                $onlineSince = $info->onlineSince;
+            } else {
+                // No OLT uptime: preserve existing online_since so it stays stable.
+                $prevOnline = $prev && ($prev['status'] ?? null) === OnuStatus::Online;
+                $onlineSince = $prevOnline && ! empty($prev['online_since'])
+                    ? Carbon::parse($prev['online_since'])
+                    : $now;
+            }
         }
 
         return [

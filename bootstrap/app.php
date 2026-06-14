@@ -16,6 +16,10 @@ return Application::configure(basePath: dirname(__DIR__))
         health: '/up',
     )
     ->withMiddleware(function (Middleware $middleware): void {
+        // Required when the app sits behind nginx, Apache, Cloudflare, cPanel, etc.
+        // so HTTPS, host, and client IP are detected correctly for sessions/CSRF.
+        $middleware->trustProxies(at: env('TRUSTED_PROXIES', '*'));
+
         $middleware->alias([
             'api.client' => AuthenticateApiClient::class,
             'permission' => EnsurePermission::class,

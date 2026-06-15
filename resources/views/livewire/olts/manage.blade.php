@@ -33,6 +33,15 @@
                     <label class="label">Model</label>
                     <input wire:model="model" class="input" placeholder="MA5800-X7">
                 </div>
+                <div>
+                    <label class="label">PON Type</label>
+                    <select wire:model="pon_type" class="input">
+                        <option value="">Auto-detect on test</option>
+                        <option value="gpon">GPON</option>
+                        <option value="epon">EPON</option>
+                    </select>
+                    <p class="mt-1 text-xs text-slate-400">Leave on auto to let "Test connection" detect it. Choosing a value locks it.</p>
+                </div>
                 <div class="sm:col-span-2">
                     <label class="label">Location</label>
                     <input wire:model="location" class="input" placeholder="Dhaka, BD">

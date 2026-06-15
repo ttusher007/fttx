@@ -2,6 +2,7 @@
 
 namespace App\Services\Olt;
 
+use App\Enums\PonType;
 use App\Models\Olt;
 use App\Services\Snmp\SnmpClient;
 use Throwable;
@@ -68,6 +69,10 @@ class OltConnectionTestService
                     $message .= ' '.implode(' · ', $details);
                 }
 
+                if ($ponNote = $this->autoDetectPonType($olt, $client, $sysDescr)) {
+                    $message .= ' '.$ponNote;
+                }
+
                 return [
                     'success' => true,
                     'message' => $message,
@@ -81,6 +86,67 @@ class OltConnectionTestService
                 'message' => $this->formatError($e, $olt, $target),
             ];
         }
+    }
+
+    /**
+     * Detect whether the OLT speaks GPON or EPON from its interface names
+     * (ifDescr "GPON0/1" / "EPON0/1") with a sysDescr fallback, and persist it
+     * to the OLT. A manually-chosen pon_type is never overwritten — only a null
+     * value or a previously auto-detected one is updated. Returns a short note
+     * for the test-result message, or null if nothing changed.
+     */
+    private function autoDetectPonType(Olt $olt, SnmpClient $client, ?string $sysDescr): ?string
+    {
+        // Respect an operator's manual choice.
+        if ($olt->pon_type !== null && ! $olt->pon_type_auto_detected) {
+            return null;
+        }
+
+        $detected = $this->sniffPonType($client, $sysDescr);
+        if ($detected === null) {
+            return null;
+        }
+
+        // Nothing to do if it already matches what we auto-set before.
+        if ($olt->pon_type === $detected && $olt->pon_type_auto_detected) {
+            return null;
+        }
+
+        $olt->forceFill([
+            'pon_type' => $detected->value,
+            'pon_type_auto_detected' => true,
+        ])->save();
+
+        return "PON type auto-detected as {$detected->label()} (saved).";
+    }
+
+    private function sniffPonType(SnmpClient $client, ?string $sysDescr): ?PonType
+    {
+        $gpon = 0;
+        $epon = 0;
+
+        foreach ($client->walk(config('olt.standard.ifDescr')) as $name) {
+            if (preg_match('/^GPON\d+\/\d+$/i', trim($name))) {
+                $gpon++;
+            } elseif (preg_match('/^EPON\d+\/\d+$/i', trim($name))) {
+                $epon++;
+            }
+        }
+
+        if ($gpon === 0 && $epon === 0) {
+            // Fall back to a hint in the system description.
+            $d = strtoupper((string) $sysDescr);
+            if (str_contains($d, 'GPON')) {
+                return PonType::Gpon;
+            }
+            if (str_contains($d, 'EPON')) {
+                return PonType::Epon;
+            }
+
+            return null;
+        }
+
+        return $gpon >= $epon ? PonType::Gpon : PonType::Epon;
     }
 
     private function formatError(Throwable $e, Olt $olt, string $target): string

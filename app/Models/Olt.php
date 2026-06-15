@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use App\Enums\OltStatus;
+use App\Enums\PonType;
 use App\Enums\SnmpVersion;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -12,6 +13,7 @@ class Olt extends Model
 {
     protected $fillable = [
         'name', 'ip_address', 'vendor', 'model', 'location',
+        'pon_type', 'pon_type_auto_detected',
         'snmp_version', 'snmp_port', 'snmp_community',
         'snmp_sec_name', 'snmp_auth_protocol', 'snmp_auth_password',
         'snmp_priv_protocol', 'snmp_priv_password',
@@ -25,6 +27,8 @@ class Olt extends Model
         return [
             'status' => OltStatus::class,
             'snmp_version' => SnmpVersion::class,
+            'pon_type' => PonType::class,
+            'pon_type_auto_detected' => 'boolean',
             'live_fetch' => 'boolean',
             'is_simulated' => 'boolean',
             // Credentials are encrypted at rest.

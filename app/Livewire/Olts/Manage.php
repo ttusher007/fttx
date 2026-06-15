@@ -22,6 +22,8 @@ class Manage extends Component
 
     public string $model = '';
 
+    public string $pon_type = '';
+
     public string $location = '';
 
     public string $snmp_version = 'v2c';
@@ -64,6 +66,7 @@ class Manage extends Component
             $this->ip_address = $olt->ip_address;
             $this->vendor = $olt->vendor;
             $this->model = (string) $olt->model;
+            $this->pon_type = $olt->pon_type?->value ?? '';
             $this->location = (string) $olt->location;
             $this->snmp_version = $olt->snmp_version->value;
             $this->snmp_port = (int) $olt->snmp_port;
@@ -112,6 +115,11 @@ class Manage extends Component
         $data = $this->validate();
 
         $payload = array_merge($data, [
+            // A pon_type picked (or confirmed) here is an operator decision, so
+            // it is marked manual — auto-detection on "Test connection" will not
+            // overwrite it. Leaving it blank lets auto-detection fill it later.
+            'pon_type' => in_array($this->pon_type, ['gpon', 'epon'], true) ? $this->pon_type : null,
+            'pon_type_auto_detected' => false,
             'live_fetch' => $this->live_fetch,
             'is_simulated' => $this->is_simulated,
             'snmp_sec_name' => $this->snmp_sec_name ?: null,

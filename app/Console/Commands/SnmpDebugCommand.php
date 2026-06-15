@@ -155,14 +155,30 @@ class SnmpDebugCommand extends Command
                 'Huawei .51.1.* — DDM table (rx/tx power, V800R019+)' => '1.3.6.1.4.1.2011.6.128.1.1.2.51.1',
             ],
             'vsol' => [
-                // VsolDriver enumerates ONUs from IF-MIB — these standard OIDs are the primary source.
+                // ONU online/offline always comes from IF-MIB (the VsolDriver spine).
                 'ifOperStatus (ONU online/offline)'  => '1.3.6.1.2.1.2.2.1.8',
                 'ifAdminStatus'                      => '1.3.6.1.2.1.2.2.1.7',
-                // Vendor-specific tables for future investigation (serial/optical/distance).
-                // The port-management table (.5.10.1.1) contains 12 GE-level entries, not GPON ONUs.
-                // The optical table (.5.12.1.1) returned 0 rows on V2.1.16 — probe after firmware upgrade.
-                'VSOL port-mgmt table (.5.10.1.1.*)' => '1.3.6.1.4.1.37950.1.1.5.10.1.1',
-                'VSOL optical table (.5.12.1.1.*)'   => '1.3.6.1.4.1.37950.1.1.5.12.1.1',
+
+                // VSOL V1600D ONU tables (enterprise 37950, devices=5), indexed by
+                // [ponIndex.onuIndex]. Derived from the V1600D MIB; this walk
+                // confirms which are populated and their value formats so the
+                // vsol pon_types map in config/olt.php can be finalised.
+                //
+                // onuInfo (.5.12.2.1):
+                'VSOL onuSnInfo serial (.2.1.5)'     => '1.3.6.1.4.1.37950.1.1.5.12.2.1.2.1.5',
+                'VSOL onuSnInfo model  (.2.1.4)'     => '1.3.6.1.4.1.37950.1.1.5.12.2.1.2.1.4',
+                'VSOL opmDiag txPower  (.8.1.6)'     => '1.3.6.1.4.1.37950.1.1.5.12.2.1.8.1.6',
+                'VSOL opmDiag rxPower  (.8.1.7)'     => '1.3.6.1.4.1.37950.1.1.5.12.2.1.8.1.7',
+                // onuAuth (.5.12.1):
+                'VSOL onuRtt distance  (.17.1.3)'    => '1.3.6.1.4.1.37950.1.1.5.12.1.17.1.3',
+                'VSOL onuMac address   (.26.1.5)'    => '1.3.6.1.4.1.37950.1.1.5.12.1.26.1.5',
+                'VSOL onuList status   (.9.1.4)'     => '1.3.6.1.4.1.37950.1.1.5.12.1.9.1.4',
+                'VSOL onuRecievePower  (.28.1.3)'    => '1.3.6.1.4.1.37950.1.1.5.12.1.28.1.3',
+
+                // V1600G GPON tree (.6.1.1.*) — only present on V1600G hardware.
+                // Walk these too in case the device uses the newer tree.
+                'VSOL V1600G optical   (.6.1.1.3.1)' => '1.3.6.1.4.1.37950.1.1.6.1.1.3.1',
+                'VSOL V1600G detail SN (.6.1.1.4.1.5)' => '1.3.6.1.4.1.37950.1.1.6.1.1.4.1.5',
             ],
             default => [],
         };

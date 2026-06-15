@@ -39,21 +39,22 @@ class DemoDataSeeder extends Seeder
 
         // --- Demo OLTs (simulated, so syncs work with no hardware) -----
         $demoOlts = [
-            ['Dhaka-Core-01', '10.10.10.1', 'huawei', 'MA5800-X7'],
-            ['Dhaka-Core-02', '10.10.10.2', 'huawei', 'MA5608T'],
-            ['Gulshan-POP-01', '10.20.10.1', 'bdcom', 'P3310B'],
-            ['Banani-POP-01', '10.20.20.1', 'vsol', 'V1600G'],
-            ['Uttara-POP-01', '10.30.10.1', 'bdcom', 'P3608B'],
-            ['Mirpur-POP-01', '10.40.10.1', 'vsol', 'V1600D'],
+            ['Dhaka-Core-01', '10.10.10.1', 'huawei', 'MA5800-X7', 'gpon'],
+            ['Dhaka-Core-02', '10.10.10.2', 'huawei', 'MA5608T', 'gpon'],
+            ['Gulshan-POP-01', '10.20.10.1', 'bdcom', 'P3310B', 'epon'],
+            ['Banani-POP-01', '10.20.20.1', 'vsol', 'V1600G', 'gpon'],
+            ['Uttara-POP-01', '10.30.10.1', 'bdcom', 'P3608B', 'epon'],
+            ['Mirpur-POP-01', '10.40.10.1', 'vsol', 'V1600D', 'gpon'],
         ];
 
-        foreach ($demoOlts as $i => [$name, $ip, $vendor, $model]) {
+        foreach ($demoOlts as $i => [$name, $ip, $vendor, $model, $ponType]) {
             Olt::updateOrCreate(
                 ['ip_address' => $ip, 'snmp_port' => 161],
                 [
                     'name' => $name,
                     'vendor' => $vendor,
                     'model' => $model,
+                    'pon_type' => $ponType,
                     'location' => 'Dhaka, BD',
                     'snmp_version' => 'v2c',
                     'snmp_community' => 'public',

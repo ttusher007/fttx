@@ -55,6 +55,8 @@ class BdcomDriver extends AbstractVendorDriver
 
     public function fetchOnus(Olt $olt): array
     {
+        $this->activeOlt = $olt;
+
         [$onuToPort, $onuNames] = $this->buildInterfaceMaps($olt);
 
         $onus = parent::fetchOnus($olt);

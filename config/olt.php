@@ -78,6 +78,12 @@ return [
     |
     | `power_divisor` converts the raw integer the OLT returns into dBm.
     |
+    | PON-TYPE OVERRIDES: GPON and EPON expose ONUs through different SNMP
+    | tables, so each vendor may define a `pon_types.gpon` / `pon_types.epon`
+    | block. Keys present there (oids, power_divisor, distance_multiplier, …)
+    | replace the vendor defaults for an OLT whose `pon_type` matches. The OLT's
+    | pon_type is chosen in the UI or auto-detected on "Test connection".
+    |
     */
     'vendors' => [
 
@@ -110,6 +116,8 @@ return [
             'distance_multiplier' => 20,
             // GP3600-08 optical col.5 returns ONU uptime in minutes (not seconds).
             'uptime_unit' => 'minutes',
+
+            // Default map = GPON (GP3600). Used when pon_type is null/gpon.
             'oids' => [
                 // GP3600 GPON (confirmed against GP3600-08 via snmpwalk).
                 'run_status'   => '1.3.6.1.4.1.3320.10.3.3.1.4',
@@ -120,27 +128,88 @@ return [
                 'distance'     => '1.3.6.1.4.1.3320.10.3.4.1.4',
                 'online_since' => '1.3.6.1.4.1.3320.10.3.4.1.5',  // ONU uptime in minutes (optical table col.5)
                 // No Ethernet/CPE MAC exposed via SNMP on GP3600-08.
-                // Legacy EPON tree (P3310/P3608 etc.):
-                // 'run_status' => '1.3.6.1.4.1.3320.101.10.1.1.26',
-                // 'serial' => '1.3.6.1.4.1.3320.101.10.1.1.3',
-                // 'rx_power' => '1.3.6.1.4.1.3320.101.10.5.1.5',
-                // 'tx_power' => '1.3.6.1.4.1.3320.101.10.5.1.6',
+            ],
+
+            'pon_types' => [
+                'gpon' => [
+                    // Same as the defaults above — kept explicit for clarity.
+                    'power_divisor' => 10,
+                    'distance_multiplier' => 20,
+                    'uptime_unit' => 'minutes',
+                    'oids' => [
+                        'run_status'   => '1.3.6.1.4.1.3320.10.3.3.1.4',
+                        'serial'       => '1.3.6.1.4.1.3320.10.3.3.1.2',
+                        'description'  => '1.3.6.1.2.1.31.1.1.1.18',
+                        'rx_power'     => '1.3.6.1.4.1.3320.10.3.4.1.2',
+                        'tx_power'     => '1.3.6.1.4.1.3320.10.3.4.1.3',
+                        'distance'     => '1.3.6.1.4.1.3320.10.3.4.1.4',
+                        'online_since' => '1.3.6.1.4.1.3320.10.3.4.1.5',
+                    ],
+                ],
+                // BDCOM EPON tree (P3310/P3608/P33xx — bdcomEponOnu, enterprise 3320.101).
+                // Columns documented in NMS-EPON-* MIBs; VERIFY with olt:snmp-debug
+                // against your EPON OLT and adjust the scaling below if needed.
+                'epon' => [
+                    'power_divisor' => 10,   // raw dBm × 10 on most EPON firmwares
+                    'distance_multiplier' => 1,
+                    'uptime_unit' => 'seconds',
+                    'oids' => [
+                        'run_status'   => '1.3.6.1.4.1.3320.101.10.1.1.26', // bdcomEponOnuStatus
+                        'serial'       => '1.3.6.1.4.1.3320.101.10.1.1.3',  // bdcomEponOnuMacAddr (EPON identifies by MAC)
+                        'mac'          => '1.3.6.1.4.1.3320.101.10.1.1.3',
+                        'description'  => '1.3.6.1.2.1.31.1.1.1.18',
+                        'rx_power'     => '1.3.6.1.4.1.3320.101.10.5.1.5',
+                        'tx_power'     => '1.3.6.1.4.1.3320.101.10.5.1.6',
+                        'distance'     => '1.3.6.1.4.1.3320.101.10.1.1.20',
+                    ],
+                ],
             ],
         ],
 
         'vsol' => [
             'driver' => VsolDriver::class,
-            'power_divisor' => 100,
+            // VSOL optical power columns are OCTET STRINGs already expressed in
+            // dBm (e.g. "-21.35"), so no scaling is applied (divisor = 1).
+            'power_divisor' => 1,
             'distance_unit' => 'm',
-            'oids' => [
-                // ONU enumeration for VSOL is done via IF-MIB ifDescr/ifOperStatus
-                // in VsolDriver::fetchOnus() — the vendor tree (.37950.1.1.5.10.1.1)
-                // is a port-management table, not a per-ONU GPON table.
-                //
-                // The optical table (.37950.1.1.5.12.1.1) returned 0 rows on V2.1.16
-                // firmware. Serial numbers and optical power (rx/tx) are not yet
-                // available via SNMP. Use `php artisan olt:snmp-debug {id}` to
-                // re-probe after a firmware upgrade and add OIDs here when found.
+
+            // No default ONU map: ONU online/offline always comes from IF-MIB
+            // (ifDescr "GPONxxONUyy" / ifOperStatus) in VsolDriver. The vendor
+            // tables below ENRICH that spine (serial, power, mac, distance),
+            // joined by the "pon.onu" index. They were derived from the VSOL
+            // V1600D MIB (enterprise 37950, devices=5). Confirm the exact tree
+            // and value formats on your firmware with `php artisan olt:snmp-debug`.
+            'oids' => [],
+
+            'pon_types' => [
+                // VSOL V1600D GPON. Tables live under onuInfo (.5.12.2.1) and
+                // onuAuth (.5.12.1); all are indexed by [ponIndex, onuIndex].
+                'gpon' => [
+                    'power_divisor' => 1,
+                    'oids' => [
+                        // onuSnInfoTable.onuID  (.5.12.2.1.2 col 5) — GPON serial
+                        'serial'   => '1.3.6.1.4.1.37950.1.1.5.12.2.1.2.1.5',
+                        // opmDiagInfoTable (.5.12.2.1.8): col 6 txPower, col 7 rxPower
+                        'tx_power' => '1.3.6.1.4.1.37950.1.1.5.12.2.1.8.1.6',
+                        'rx_power' => '1.3.6.1.4.1.37950.1.1.5.12.2.1.8.1.7',
+                        // onuMacTable.onuMacAddress (.5.12.1.26 col 5)
+                        'mac'      => '1.3.6.1.4.1.37950.1.1.5.12.1.26.1.5',
+                        // onuRttTable.onuRttValue (.5.12.1.17 col 3) — ranging distance.
+                        // Raw is firmware-dependent (often metres already); confirm scaling.
+                        'distance' => '1.3.6.1.4.1.37950.1.1.5.12.1.17.1.3',
+                    ],
+                ],
+                // VSOL V1600D EPON. EPON identifies ONUs by MAC; status/mac come
+                // from onuListTable (.5.12.1.9), optical from onuRecievePowerTable.
+                'epon' => [
+                    'power_divisor' => 1,
+                    'oids' => [
+                        'serial'   => '1.3.6.1.4.1.37950.1.1.5.12.1.9.1.5', // onuListTable.macAddress
+                        'mac'      => '1.3.6.1.4.1.37950.1.1.5.12.1.9.1.5',
+                        'rx_power' => '1.3.6.1.4.1.37950.1.1.5.12.1.28.1.3', // onuRecievePowerTable.onuRecievepower
+                        'tx_power' => '1.3.6.1.4.1.37950.1.1.5.12.2.1.8.1.6', // opmDiagInfoTable.txPower
+                    ],
+                ],
             ],
         ],
 

@@ -20,12 +20,30 @@ use Carbon\CarbonInterface;
  */
 abstract class AbstractVendorDriver implements VendorDriver
 {
+    /**
+     * The OLT currently being polled. Set at the start of fetch calls so the
+     * config resolver can apply the right pon_type (GPON/EPON) OID overrides.
+     */
+    protected ?Olt $activeOlt = null;
+
     /** Config key under olt.vendors.* */
     abstract protected function vendorKey(): string;
 
+    /**
+     * Effective vendor config, with the OLT's pon_type override merged on top
+     * of the vendor defaults. Keys under `pon_types.{type}` replace the matching
+     * top-level keys (e.g. a gpon/epon-specific `oids` map or `power_divisor`).
+     */
     protected function config(): array
     {
-        return config("olt.vendors.{$this->vendorKey()}", []);
+        $base = config("olt.vendors.{$this->vendorKey()}", []);
+
+        $type = $this->activeOlt?->pon_type?->value;
+        if ($type && isset($base['pon_types'][$type]) && is_array($base['pon_types'][$type])) {
+            return array_replace($base, $base['pon_types'][$type]);
+        }
+
+        return $base;
     }
 
     protected function oids(): array
@@ -134,6 +152,8 @@ abstract class AbstractVendorDriver implements VendorDriver
 
     public function fetchOnus(Olt $olt): array
     {
+        $this->activeOlt = $olt;
+
         if ($olt->shouldSimulate()) {
             return app(OltSimulator::class)->onus($olt);
         }
@@ -185,6 +205,8 @@ abstract class AbstractVendorDriver implements VendorDriver
 
     public function fetchOnu(Olt $olt, string $onuIndex): ?OnuInfo
     {
+        $this->activeOlt = $olt;
+
         if ($olt->shouldSimulate()) {
             return app(OltSimulator::class)->onu($olt, $onuIndex);
         }

@@ -11,7 +11,17 @@
                     <x-badge :color="$olt->status->color()">{{ $olt->status->label() }}</x-badge>
                     @if ($olt->is_simulated)<x-badge color="amber">SIM</x-badge>@endif
                 </div>
-                <p class="text-sm text-slate-500">{{ $olt->ip_address }} · <span class="capitalize">{{ $olt->vendor }}</span> {{ $olt->model }}</p>
+                <p class="text-sm text-slate-500">
+                    {{ $olt->ip_address }} · <span class="capitalize">{{ $olt->vendor }}</span> {{ $olt->model }}
+                    @if ($olt->pon_type)
+                        · <span class="inline-flex items-center gap-1 rounded bg-slate-100 px-1.5 py-0.5 text-xs font-medium text-slate-600">
+                            {{ $olt->pon_type->label() }}
+                            @if ($olt->pon_type_auto_detected)
+                                <span class="text-[10px] font-normal text-slate-400" title="Detected automatically on test connection">auto</span>
+                            @endif
+                        </span>
+                    @endif
+                </p>
             </div>
         </div>
         <div class="flex flex-wrap gap-2">

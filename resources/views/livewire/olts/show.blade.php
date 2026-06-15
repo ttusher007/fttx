@@ -159,9 +159,10 @@
             <thead class="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-400">
                 <tr>
                     <th class="px-4 py-3">Serial / MAC</th>
-                    <th class="px-4 py-3">Port</th>
+                    <th class="px-4 py-3">PON Port</th>
+                    <th class="px-4 py-3">ONU Port</th>
                     <th class="px-4 py-3">Status</th>
-                    <th class="px-4 py-3">Rx / Tx (dBm)</th>
+                    <th class="px-4 py-3">↓OLT→ONU / ↑ONU→OLT (dBm)</th>
                     <th class="px-4 py-3">Distance</th>
                     <th class="px-4 py-3">Live since</th>
                     <th class="px-4 py-3"></th>
@@ -174,7 +175,8 @@
                             <p class="font-medium text-slate-800">{{ $onu->serial_number ?: '—' }}</p>
                             <p class="text-xs text-slate-400">{{ $onu->mac_address ?: 'no MAC' }} · {{ $onu->description }}</p>
                         </td>
-                        <td class="px-4 py-3 text-slate-500">{{ $onu->port?->name ?: $onu->onu_index }}</td>
+                        <td class="px-4 py-3 text-slate-500">{{ $onu->port?->name ?: '—' }}</td>
+                        <td class="px-4 py-3 text-slate-500">{{ $onu->name ?: $onu->onu_index }}</td>
                         <td class="px-4 py-3"><x-badge :color="$onu->status->color()">{{ $onu->status->label() }}</x-badge></td>
                         <td class="px-4 py-3">
                             @include('livewire.olts.partials.power', ['onu' => $onu])
@@ -188,7 +190,7 @@
                         </td>
                     </tr>
                 @empty
-                    <tr><td colspan="7" class="px-4 py-8 text-center text-slate-400">No ONUs found.</td></tr>
+                    <tr><td colspan="8" class="px-4 py-8 text-center text-slate-400">No ONUs found.</td></tr>
                 @endforelse
             </tbody>
         </table>
@@ -204,9 +206,12 @@
                         </div>
                         <x-badge :color="$onu->status->color()">{{ $onu->status->label() }}</x-badge>
                     </div>
-                    <div class="mt-2 grid grid-cols-3 gap-2 text-xs text-slate-500">
-                        <span>Port<br><span class="font-medium text-slate-700">{{ $onu->port?->name ?: $onu->onu_index }}</span></span>
-                        <span>Rx/Tx<br>@include('livewire.olts.partials.power', ['onu' => $onu])</span>
+                    <div class="mt-2 grid grid-cols-2 gap-2 text-xs text-slate-500">
+                        <span>PON Port<br><span class="font-medium text-slate-700">{{ $onu->port?->name ?: '—' }}</span></span>
+                        <span>ONU Port<br><span class="font-medium text-slate-700">{{ $onu->name ?: $onu->onu_index }}</span></span>
+                    </div>
+                    <div class="mt-1 grid grid-cols-2 gap-2 text-xs text-slate-500">
+                        <span>Power<br>@include('livewire.olts.partials.power', ['onu' => $onu])</span>
                         <span>Distance<br><span class="font-medium text-slate-700">{{ $onu->distance ? number_format($onu->distance).' m' : '—' }}</span></span>
                     </div>
                 </div>

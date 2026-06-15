@@ -10,6 +10,7 @@ use App\Services\Olt\Data\PortInfo;
 use App\Services\Olt\Data\SystemInfo;
 use App\Services\Olt\Simulator\OltSimulator;
 use App\Services\Snmp\SnmpClient;
+use Carbon\CarbonInterface;
 
 /**
  * Shared SNMP logic for all vendor drivers. System info and ports come from
@@ -35,6 +36,35 @@ abstract class AbstractVendorDriver implements VendorDriver
     protected function powerDivisor(): int
     {
         return (int) ($this->config()['power_divisor'] ?? 100);
+    }
+
+    protected function distanceMultiplier(): float
+    {
+        return (float) ($this->config()['distance_multiplier'] ?? 1);
+    }
+
+    protected function parseDistance(?string $raw): ?float
+    {
+        if ($raw === null || $raw === '' || ! is_numeric($raw)) {
+            return null;
+        }
+        $val = (float) $raw;
+        // -1 is a common "not available" sentinel (e.g. Huawei offline ONU).
+        if ($val < 0) {
+            return null;
+        }
+        return round($val * $this->distanceMultiplier());
+    }
+
+    protected function parseOnlineSince(?string $raw): ?CarbonInterface
+    {
+        if ($raw === null || $raw === '' || ! is_numeric($raw) || (int) $raw <= 0) {
+            return null;
+        }
+        $unit = $this->config()['uptime_unit'] ?? 'seconds';
+        return $unit === 'minutes'
+            ? now()->subMinutes((int) $raw)
+            : now()->subSeconds((int) $raw);
     }
 
     public function probe(Olt $olt): bool
@@ -123,6 +153,7 @@ abstract class AbstractVendorDriver implements VendorDriver
         $mac      = isset($oids['mac'])          ? $client->walk($oids['mac'])          : [];
         $desc     = isset($oids['description'])  ? $client->walk($oids['description'])  : [];
         $uptimes  = isset($oids['online_since']) ? $client->walk($oids['online_since']) : [];
+        $ifNames  = $this->fetchIfNames($client);
 
         $client->close();
 
@@ -131,29 +162,21 @@ abstract class AbstractVendorDriver implements VendorDriver
             array_keys($serials), array_keys($status), array_keys($rx)
         ));
 
-        $uptimeUnit = $this->config()['uptime_unit'] ?? 'seconds';
-        $now = now();
         $onus = [];
         foreach ($indexes as $index) {
-            $onlineSince = null;
-            $rawUptime = $uptimes[$index] ?? null;
-            if ($rawUptime !== null && is_numeric($rawUptime) && (int) $rawUptime > 0) {
-                $onlineSince = $uptimeUnit === 'minutes'
-                    ? $now->copy()->subMinutes((int) $rawUptime)
-                    : $now->copy()->subSeconds((int) $rawUptime);
-            }
-
+            $portIndex = $this->derivePortIndex((string) $index);
             $onus[] = new OnuInfo(
                 onuIndex: (string) $index,
-                portIndex: $this->derivePortIndex((string) $index),
+                portIndex: $portIndex,
                 serialNumber: $this->normaliseSerial($serials[$index] ?? null),
                 macAddress: $this->normaliseMac($mac[$index] ?? null),
+                name: $this->buildOnuName((string) $index, $portIndex, $ifNames),
                 description: $desc[$index] ?? null,
                 status: $this->mapStatus($status[$index] ?? null),
                 rxPower: $this->parsePower($rx[$index] ?? null),
                 txPower: $this->parsePower($tx[$index] ?? null),
-                distance: isset($dist[$index]) ? (float) $dist[$index] : null,
-                onlineSince: $onlineSince,
+                distance: $this->parseDistance($dist[$index] ?? null),
+                onlineSince: $this->parseOnlineSince($uptimes[$index] ?? null),
             );
         }
 
@@ -235,6 +258,24 @@ abstract class AbstractVendorDriver implements VendorDriver
     protected function normaliseSerial(?string $raw): ?string
     {
         return $raw ? strtoupper(trim($raw)) : null;
+    }
+
+    /**
+     * Optionally fetch a portIfIndex → name map during the ONU walk.
+     * Returns [] by default (no extra SNMP round trip); override when needed.
+     */
+    protected function fetchIfNames(SnmpClient $client): array
+    {
+        return [];
+    }
+
+    /**
+     * Optionally build an ONU sub-interface name (e.g. "GPON 0/0/0:2").
+     * Returns null by default (the UI falls back to onu_index).
+     */
+    protected function buildOnuName(string $onuIndex, ?string $portIndex, array $ifNames): ?string
+    {
+        return null;
     }
 
     /**

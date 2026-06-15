@@ -139,14 +139,30 @@ class SnmpDebugCommand extends Command
                 'dot1dTpFdbTable (bridge MAC table)'             => '1.3.6.1.2.1.17.4.3.1',
             ],
             'huawei' => [
-                'Huawei ONU info table (.2.43.1.*)'    => '1.3.6.1.4.1.2011.6.128.1.1.2.43.1',
-                'Huawei ONU status table (.2.46.1.*)'  => '1.3.6.1.4.1.2011.6.128.1.1.2.46.1',
-                'Huawei ONU optical table (.2.51.1.*)' => '1.3.6.1.4.1.2011.6.128.1.1.2.51.1',
-                'Huawei ONU MAC table (.2.45.1.*)'     => '1.3.6.1.4.1.2011.6.128.1.1.2.45.1',
+                // IF-MIB ifName — gives real port names (e.g. "GPON 0/0/0"). Run with --limit=0.
+                'ifName (real port names — use --limit=0)'           => '1.3.6.1.2.1.31.1.1.1.1',
+
+                // ONU info table key columns
+                'Huawei .43.1.3 — serial number'                    => '1.3.6.1.4.1.2011.6.128.1.1.2.43.1.3',
+                'Huawei .43.1.9 — description'                      => '1.3.6.1.4.1.2011.6.128.1.1.2.43.1.9',
+
+                // ONU control/status table
+                'Huawei .46.1.15 — run_status'                      => '1.3.6.1.4.1.2011.6.128.1.1.2.46.1.15',
+                'Huawei .46.1.20 — distance'                        => '1.3.6.1.4.1.2011.6.128.1.1.2.46.1.20',
+                'Huawei .46.1.23 — online_since (DateAndTime hex)'  => '1.3.6.1.4.1.2011.6.128.1.1.2.46.1.23',
+                // Optical DDM — hwGponOntOpticalDdmTable; returns 0 rows on MA5683T V800R018.
+                // Will populate on V800R019+ firmware. Probing here to detect when it becomes available.
+                'Huawei .51.1.* — DDM table (rx/tx power, V800R019+)' => '1.3.6.1.4.1.2011.6.128.1.1.2.51.1',
             ],
             'vsol' => [
-                'VSOL ONU table (.5.10.1.1.*)'    => '1.3.6.1.4.1.37950.1.1.5.10.1.1',
-                'VSOL optical table (.5.12.1.1.*)' => '1.3.6.1.4.1.37950.1.1.5.12.1.1',
+                // VsolDriver enumerates ONUs from IF-MIB — these standard OIDs are the primary source.
+                'ifOperStatus (ONU online/offline)'  => '1.3.6.1.2.1.2.2.1.8',
+                'ifAdminStatus'                      => '1.3.6.1.2.1.2.2.1.7',
+                // Vendor-specific tables for future investigation (serial/optical/distance).
+                // The port-management table (.5.10.1.1) contains 12 GE-level entries, not GPON ONUs.
+                // The optical table (.5.12.1.1) returned 0 rows on V2.1.16 — probe after firmware upgrade.
+                'VSOL port-mgmt table (.5.10.1.1.*)' => '1.3.6.1.4.1.37950.1.1.5.10.1.1',
+                'VSOL optical table (.5.12.1.1.*)'   => '1.3.6.1.4.1.37950.1.1.5.12.1.1',
             ],
             default => [],
         };

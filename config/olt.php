@@ -83,19 +83,21 @@ return [
 
         'huawei' => [
             'driver' => HuaweiDriver::class,
-            'power_divisor' => 100,    // raw is dBm * 100, signed
-            'distance_unit' => 'm',
+            'power_divisor' => 100,    // raw is dBm × 100, signed
+            'distance_unit' => 'm',    // distance is in metres; -1 means offline/unknown
             'oids' => [
-                // hwGponDeviceOntInfoTable / hwGponOntOpticalDdmTable (MA5600/MA5800)
-                'onu_index' => '1.3.6.1.4.1.2011.6.128.1.1.2.43.1.2',
-                'serial' => '1.3.6.1.4.1.2011.6.128.1.1.2.43.1.3',
-                'run_status' => '1.3.6.1.4.1.2011.6.128.1.1.2.46.1.15',
-                'distance' => '1.3.6.1.4.1.2011.6.128.1.1.2.46.1.20',
-                'rx_power' => '1.3.6.1.4.1.2011.6.128.1.1.2.51.1.4',
-                'tx_power' => '1.3.6.1.4.1.2011.6.128.1.1.2.51.1.6',
+                // hwGponDeviceOntInfoTable (MA5600/MA5683T/MA5800)
+                'onu_index'   => '1.3.6.1.4.1.2011.6.128.1.1.2.43.1.2',
+                'serial'      => '1.3.6.1.4.1.2011.6.128.1.1.2.43.1.3',
                 'description' => '1.3.6.1.4.1.2011.6.128.1.1.2.43.1.9',
-                'mac' => '1.3.6.1.4.1.2011.6.128.1.1.2.45.1.2',
+                // hwGponDeviceOntControlTable
+                'run_status'  => '1.3.6.1.4.1.2011.6.128.1.1.2.46.1.15',
+                'distance'    => '1.3.6.1.4.1.2011.6.128.1.1.2.46.1.20',
+                // .46.1.23 returns SNMP DateAndTime OctetString (hex) — decoded in HuaweiDriver
                 'online_since' => '1.3.6.1.4.1.2011.6.128.1.1.2.46.1.23',
+                // Optical DDM (rx/tx power) is NOT available via SNMP on MA5683T V800R018.
+                // hwGponOntOpticalDdmTable (.51.1.*) exists only from V800R019+.
+                // Power will show null until firmware is upgraded or a later model is used.
             ],
         ],
 
@@ -103,6 +105,9 @@ return [
             'driver' => BdcomDriver::class,
             'power_divisor' => 10,
             'distance_unit' => 'm',
+            // GP3600-08 col.4 returns distance in 20-metre units (confirmed via snmpwalk:
+            // raw 33 = 660 m, raw 32 = 640 m on a site where actual fibre runs are ~630–650 m).
+            'distance_multiplier' => 20,
             // GP3600-08 optical col.5 returns ONU uptime in minutes (not seconds).
             'uptime_unit' => 'minutes',
             'oids' => [
@@ -128,16 +133,14 @@ return [
             'power_divisor' => 100,
             'distance_unit' => 'm',
             'oids' => [
-                // VSOL GPON (Broadcom-based). Verify per firmware.
-                'onu_index' => '1.3.6.1.4.1.37950.1.1.5.10.1.1.1',
-                'serial' => '1.3.6.1.4.1.37950.1.1.5.10.1.1.3',
-                'run_status' => '1.3.6.1.4.1.37950.1.1.5.10.1.1.5',
-                'distance' => '1.3.6.1.4.1.37950.1.1.5.10.1.1.8',
-                'rx_power' => '1.3.6.1.4.1.37950.1.1.5.12.1.1.4',
-                'tx_power' => '1.3.6.1.4.1.37950.1.1.5.12.1.1.5',
-                'description' => '1.3.6.1.4.1.37950.1.1.5.10.1.1.9',
-                'mac' => '1.3.6.1.4.1.37950.1.1.5.10.1.1.2',
-                'online_since' => '1.3.6.1.4.1.37950.1.1.5.10.1.1.7',
+                // ONU enumeration for VSOL is done via IF-MIB ifDescr/ifOperStatus
+                // in VsolDriver::fetchOnus() — the vendor tree (.37950.1.1.5.10.1.1)
+                // is a port-management table, not a per-ONU GPON table.
+                //
+                // The optical table (.37950.1.1.5.12.1.1) returned 0 rows on V2.1.16
+                // firmware. Serial numbers and optical power (rx/tx) are not yet
+                // available via SNMP. Use `php artisan olt:snmp-debug {id}` to
+                // re-probe after a firmware upgrade and add OIDs here when found.
             ],
         ],
 

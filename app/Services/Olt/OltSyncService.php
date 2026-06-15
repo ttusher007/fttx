@@ -169,7 +169,7 @@ class OltSyncService
         Onu::upsert(
             $rows,
             ['olt_id', 'onu_index'],
-            ['olt_port_id', 'serial_number', 'mac_address', 'description', 'status',
+            ['olt_port_id', 'serial_number', 'mac_address', 'name', 'description', 'status',
                 'rx_power', 'tx_power', 'distance', 'online_since', 'last_seen_at',
                 'last_synced_at', 'updated_at'],
         );
@@ -204,6 +204,7 @@ class OltSyncService
             'olt_port_id' => $portId,
             'serial_number' => $info->serialNumber,
             'mac_address' => $info->macAddress,
+            'name' => $info->name,
             'description' => $info->description,
             'status' => $info->status->value,
             'rx_power' => $info->rxPower,

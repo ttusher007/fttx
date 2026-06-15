@@ -24,9 +24,10 @@
                 <tr>
                     <th class="px-4 py-3">Serial / MAC</th>
                     <th class="px-4 py-3">OLT</th>
-                    <th class="px-4 py-3">Port</th>
+                    <th class="px-4 py-3">PON Port</th>
+                    <th class="px-4 py-3">ONU Port</th>
                     <th class="px-4 py-3">Status</th>
-                    <th class="px-4 py-3">Rx / Tx</th>
+                    <th class="px-4 py-3">↓OLT→ONU / ↑ONU→OLT</th>
                     <th class="px-4 py-3">Live since</th>
                     <th class="px-4 py-3"></th>
                 </tr>
@@ -41,7 +42,8 @@
                         <td class="px-4 py-3">
                             <a href="{{ route('olts.show', $onu->olt_id) }}" wire:navigate class="text-indigo-600 hover:text-indigo-500">{{ $onu->olt?->name }}</a>
                         </td>
-                        <td class="px-4 py-3 text-slate-500">{{ $onu->port?->name ?: $onu->onu_index }}</td>
+                        <td class="px-4 py-3 text-slate-500">{{ $onu->port?->name ?: '—' }}</td>
+                        <td class="px-4 py-3 text-slate-500">{{ $onu->name ?: $onu->onu_index }}</td>
                         <td class="px-4 py-3"><x-badge :color="$onu->status->color()">{{ $onu->status->label() }}</x-badge></td>
                         <td class="px-4 py-3">@include('livewire.olts.partials.power', ['onu' => $onu])</td>
                         <td class="px-4 py-3 text-slate-500">{{ $onu->online_since?->diffForHumans(null, true) ?? '—' }}</td>
@@ -50,7 +52,7 @@
                         </td>
                     </tr>
                 @empty
-                    <tr><td colspan="7" class="px-4 py-10 text-center text-slate-400">No ONUs found.</td></tr>
+                    <tr><td colspan="8" class="px-4 py-10 text-center text-slate-400">No ONUs found.</td></tr>
                 @endforelse
             </tbody>
         </table>
@@ -66,7 +68,10 @@
                         <x-badge :color="$onu->status->color()">{{ $onu->status->label() }}</x-badge>
                     </div>
                     <div class="mt-2 flex items-center justify-between text-xs text-slate-500">
-                        <a href="{{ route('olts.show', $onu->olt_id) }}" wire:navigate class="text-indigo-600">{{ $onu->olt?->name }} · {{ $onu->port?->name ?: $onu->onu_index }}</a>
+                        <div>
+                            <a href="{{ route('olts.show', $onu->olt_id) }}" wire:navigate class="text-indigo-600">{{ $onu->olt?->name }}</a>
+                            <span class="ml-1">· {{ $onu->port?->name ?: '—' }} · {{ $onu->name ?: $onu->onu_index }}</span>
+                        </div>
                         <span>@include('livewire.olts.partials.power', ['onu' => $onu])</span>
                     </div>
                 </div>

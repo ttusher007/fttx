@@ -49,9 +49,9 @@ class Onu extends Model
         }
 
         return match (true) {
-            $rx >= -8 && $rx <= -25 => 'good',  // typical healthy GPON window
-            $rx > -8 || $rx < -28 => 'critical',
-            default => 'warning',
+            $rx >= -25 && $rx <= -8 => 'good',   // healthy GPON window (-8 to -25 dBm)
+            $rx > -8 || $rx < -28 => 'critical', // too strong or too weak
+            default => 'warning',                 // marginal (-25 to -28 dBm)
         };
     }
 

@@ -22,6 +22,8 @@ the /raw endpoint. The README explains exactly how.
 
 import os
 import re
+import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 from typing import Optional
 
 from fastapi import FastAPI, Header, HTTPException
@@ -36,6 +38,12 @@ from netmiko.ssh_dispatcher import CLASS_MAPPER
 # always set a real value in production.
 API_KEY = os.environ.get("COLLECTOR_API_KEY", "change-me")
 SESSION_LOG = os.environ.get("COLLECTOR_SESSION_LOG")  # optional netmiko trace file
+JOB_TIMEOUT = int(os.environ.get("COLLECTOR_JOB_TIMEOUT", "240"))  # wall-clock cap per HTTP call
+
+# Huawei MA5683T prompts end with > or # (sometimes after banner text).
+HUAWEI_PROMPT_RE = re.compile(r"[>#]\s*$")
+# Incomplete "display" command interactive menu (we landed here if a space broke the line).
+HUAWEI_DISPLAY_MENU_RE = re.compile(r"\{\s*<cr>\|", re.IGNORECASE)
 
 app = FastAPI(title="OLT SSH/Telnet Collector", version="1.0")
 
@@ -49,11 +57,92 @@ class HuaweiOltTelnet(HuaweiTelnet):
     """
 
     def session_preparation(self) -> None:
-        self.set_base_prompt()
+        # set_base_prompt() can block on noisy banners — keep it short.
+        try:
+            self.set_base_prompt(pattern=r"[>#]")
+        except Exception:
+            self.base_prompt = ">"
+            self.prompt = r"\>"
 
 
 # Register once so ConnectHandler(device_type="huawei_olt_telnet", ...) works.
 CLASS_MAPPER["huawei_olt_telnet"] = HuaweiOltTelnet
+
+
+def _is_huawei_telnet(device_type: str) -> bool:
+    return device_type in ("huawei_olt_telnet", "huawei_telnet")
+
+
+def _huawei_telnet_line(command: str) -> str:
+    """Build a command line for MA5683T telnet.
+
+    On this firmware, a SPACE after the first word triggers tab-completion (bell /
+    early execute) so 'display version' becomes just 'display'. Use TAB between
+    words instead — same as typing display<TAB>version<ENTER> on the console.
+    """
+    parts = command.strip().split()
+    if len(parts) <= 1:
+        return parts[0] + "\r" if parts else "\r"
+    return parts[0] + "".join("\t" + p for p in parts[1:]) + "\r"
+
+
+def _drain_channel(conn, seconds: float = 1.5) -> str:
+    """Read any login banners / async alarms before the first command."""
+    return _read_channel_until_prompt(conn, read_timeout=seconds, idle_seconds=0.4)
+
+
+def _abort_to_idle(conn, read_timeout: float = 5) -> None:
+    """Ctrl+C out of partial commands / interactive menus back to MA5683T>."""
+    for _ in range(3):
+        conn.write_channel("\x03")
+        time.sleep(0.12)
+    _read_channel_until_prompt(conn, read_timeout=read_timeout, idle_seconds=0.4)
+
+
+def _read_channel_until_prompt(conn, read_timeout: float, idle_seconds: float = 2.0) -> str:
+    """Read telnet output until Huawei prompt or timeout (no regex prompt matching)."""
+    output = ""
+    deadline = time.monotonic() + read_timeout
+    idle_deadline = None
+
+    while time.monotonic() < deadline:
+        chunk = conn.read_channel()
+        if chunk:
+            output += chunk
+            idle_deadline = None
+            if "---- More" in chunk or "----More" in chunk:
+                conn.write_channel(" ")
+                continue
+            tail = output.splitlines()[-1] if output.splitlines() else ""
+            if HUAWEI_PROMPT_RE.search(tail):
+                break
+            if HUAWEI_DISPLAY_MENU_RE.search(tail):
+                break
+        else:
+            if idle_deadline is None:
+                idle_deadline = time.monotonic() + idle_seconds
+            elif time.monotonic() >= idle_deadline:
+                break
+            time.sleep(0.15)
+
+    return output
+
+
+def _send_channel(conn, command: str, read_timeout: float = 60) -> str:
+    """Low-level send for Huawei telnet — avoids send_command prompt hangs."""
+    _abort_to_idle(conn)
+    conn.write_channel(_huawei_telnet_line(command))
+    output = _read_channel_until_prompt(conn, read_timeout=read_timeout)
+
+    # Still in the 'display' submenu or only saw async alarms — retry once.
+    if HUAWEI_DISPLAY_MENU_RE.search(output) or (
+        "version" in command.lower() and "VERSION" not in output.upper() and "VRP" not in output
+    ):
+        _abort_to_idle(conn)
+        conn.write_channel(_huawei_telnet_line(command))
+        output = _read_channel_until_prompt(conn, read_timeout=read_timeout)
+
+    return output
 
 
 # ---------------------------------------------------------------------------
@@ -101,7 +190,8 @@ def _connect(req: OltRequest):
         port=req.port or (23 if req.protocol == "telnet" else 22),
         fast_cli=False,
         conn_timeout=30,
-        read_timeout_override=120,
+        auth_timeout=30,
+        read_timeout_override=60,
         global_cmd_verify=False,
     )
     if SESSION_LOG:
@@ -110,38 +200,74 @@ def _connect(req: OltRequest):
     return ConnectHandler(**kwargs)
 
 
-def _prep_session(conn, device_type: str) -> None:
+def _prep_session(conn, device_type: str, protocol: str) -> None:
     """Disable paging after login. Failures are ignored (model/firmware vary)."""
-    for prep in ("screen-length 0 temporary", "screen-length 0", "scroll 512"):
+    if _is_huawei_telnet(device_type):
+        _drain_channel(conn, seconds=2)
+        # MA5683T V800R018: prefer scroll; screen-length often missing or interactive.
+        prep_commands = ("scroll 512", "screen-length 0 temporary", "screen-length 0")
+    else:
+        prep_commands = ("screen-length 0 temporary", "screen-length 0", "scroll 512")
+
+    for prep in prep_commands:
         try:
-            conn.send_command(prep, read_timeout=20, cmd_verify=False)
+            if _is_huawei_telnet(device_type):
+                _send_channel(conn, prep, read_timeout=8)
+            else:
+                conn.send_command(prep, read_timeout=10, cmd_verify=False)
         except Exception:
             pass
 
 
-def _send(conn, device_type: str, command: str, read_timeout: int = 90) -> str:
-    # Netmiko docs: Huawei telnet breaks with send_command_timing — use send_command.
-    return conn.send_command(command, read_timeout=read_timeout, cmd_verify=False)
+def _command_timeout(command: str) -> float:
+    """Per-command read budget (seconds)."""
+    if "mac-address all" in command:
+        return 180.0
+    if "optical-info" in command and " all" in command:
+        return 120.0
+    return 45.0
+
+
+def _send(conn, device_type: str, command: str) -> str:
+    read_timeout = _command_timeout(command)
+    if _is_huawei_telnet(device_type):
+        return _send_channel(conn, command, read_timeout=read_timeout)
+    return conn.send_command(command, read_timeout=int(read_timeout), cmd_verify=False)
+
+
+def _run_commands_body(req: OltRequest, commands: list[str]) -> str:
+    """Open one session, run several commands, return all output joined."""
+    out = []
+    device_type = _device_type(req)
+    protocol = "telnet" if req.protocol == "telnet" else "ssh"
+    with _connect(req) as conn:
+        if protocol != "telnet":
+            try:
+                conn.enable()
+            except Exception:
+                pass
+        _prep_session(conn, device_type, protocol)
+        for cmd in commands:
+            out.append(f"### {cmd}\n" + _send(conn, device_type, cmd))
+    return "\n".join(out)
+
+
+def _run_commands(req: OltRequest, commands: list[str]) -> str:
+    """Wall-clock cap so Laravel always gets a JSON error instead of hanging."""
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(_run_commands_body, req, commands)
+        try:
+            return future.result(timeout=JOB_TIMEOUT)
+        except FuturesTimeout as exc:
+            raise HTTPException(
+                status_code=504,
+                detail=f"OLT session timed out after {JOB_TIMEOUT}s (login or command still running)",
+            ) from exc
 
 
 def _auth(key: Optional[str]):
     if key != API_KEY:
         raise HTTPException(status_code=401, detail="Bad or missing collector API key")
-
-
-def _run_commands(req: OltRequest, commands: list[str]) -> str:
-    """Open one session, run several commands, return all output joined."""
-    out = []
-    device_type = _device_type(req)
-    with _connect(req) as conn:
-        try:
-            conn.enable()          # harmless if the device has no enable mode
-        except Exception:
-            pass
-        _prep_session(conn, device_type)
-        for cmd in commands:
-            out.append(f"### {cmd}\n" + _send(conn, device_type, cmd))
-    return "\n".join(out)
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +290,8 @@ def raw(req: OltRequest, x_collector_key: Optional[str] = Header(None)):
         raise HTTPException(status_code=400, detail="`command` is required for /raw")
     try:
         return {"output": _run_commands(req, [req.command])}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"OLT connection/command failed: {e}")
 
@@ -175,6 +303,8 @@ def onu_optical(req: OltRequest, x_collector_key: Optional[str] = Header(None)):
     cmd = _huawei_optical_command(req)
     try:
         text = _run_commands(req, [cmd])
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"OLT connection/command failed: {e}")
     return {"command": cmd, "rows": parse_huawei_optical(text), "raw": text}
@@ -187,6 +317,8 @@ def onu_mac(req: OltRequest, x_collector_key: Optional[str] = Header(None)):
     cmd = _huawei_mac_command(req)
     try:
         text = _run_commands(req, [cmd])
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"OLT connection/command failed: {e}")
     return {"command": cmd, "rows": parse_huawei_mac(text), "raw": text}

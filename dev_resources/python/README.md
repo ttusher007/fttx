@@ -374,6 +374,7 @@ can't provide the data.
 | `OLT connection/command failed`           | Wrong protocol/port/credentials. Try `"protocol":"ssh"` ↔ `"telnet"`, add `"port":23`, or `"device_type":"generic_telnet"`. |
 | `Pattern not detected: 'screen-length'`   | Old Huawei telnet firmware. Update `collector.py` (uses `huawei_olt_telnet` now) and `sudo systemctl restart olt-collector`. |
 | Output is only `display version` (no data) | Wrong telnet driver (`generic_telnet`). Update `collector.py` and restart — needs `huawei_olt_telnet`. |
+| `cURL error 28` / timed out after 120s    | Collector stuck on telnet prompt. Update `collector.py`, set `OLT_COLLECTOR_TIMEOUT=300` in Laravel `.env`, restart both services. |
 | Telnet logs in but output looks cut off   | Paging. The collector tries to disable it; some models need a different command — tell your developer the model. |
 | `ModuleNotFoundError`                      | The venv isn't active or libraries weren't installed. `source venv/bin/activate` then `pip install -r requirements.txt`. |
 

@@ -40,7 +40,7 @@ return [
     'olt_collector' => [
         'url' => env('OLT_COLLECTOR_URL', 'http://127.0.0.1:8800'),
         'key' => env('OLT_COLLECTOR_KEY'),
-        'timeout' => (int) env('OLT_COLLECTOR_TIMEOUT', 120),
+        'timeout' => (int) env('OLT_COLLECTOR_TIMEOUT', 300),
     ],
 
 ];

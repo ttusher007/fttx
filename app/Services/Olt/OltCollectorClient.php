@@ -3,6 +3,7 @@
 namespace App\Services\Olt;
 
 use App\Models\Olt;
+use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\PendingRequest;
 use Illuminate\Support\Facades\Http;
 use RuntimeException;
@@ -95,7 +96,16 @@ class OltCollectorClient
      */
     private function post(string $path, array $payload): array
     {
-        $response = $this->client()->post($this->url($path), $payload);
+        try {
+            $response = $this->client()->post($this->url($path), $payload);
+        } catch (ConnectionException $e) {
+            $timeout = (int) config('services.olt_collector.timeout', 300);
+            throw new RuntimeException(
+                "Collector request timed out after {$timeout}s — the OLT telnet session may be stuck. "
+                .'Check `systemctl status olt-collector` and update collector.py, then retry. '
+                .$e->getMessage(),
+            );
+        }
 
         if ($response->failed()) {
             $detail = $response->json('detail') ?? $response->body();
@@ -114,7 +124,7 @@ class OltCollectorClient
         }
 
         return Http::withHeaders(['X-Collector-Key' => $key])
-            ->timeout((int) config('services.olt_collector.timeout', 120))
+            ->timeout((int) config('services.olt_collector.timeout', 300))
             ->acceptJson();
     }
 

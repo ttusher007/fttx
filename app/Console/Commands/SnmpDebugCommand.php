@@ -150,9 +150,30 @@ class SnmpDebugCommand extends Command
                 'Huawei .46.1.15 — run_status'                      => '1.3.6.1.4.1.2011.6.128.1.1.2.46.1.15',
                 'Huawei .46.1.20 — distance'                        => '1.3.6.1.4.1.2011.6.128.1.1.2.46.1.20',
                 'Huawei .46.1.23 — online_since (DateAndTime hex)'  => '1.3.6.1.4.1.2011.6.128.1.1.2.46.1.23',
-                // Optical DDM — hwGponOntOpticalDdmTable; returns 0 rows on MA5683T V800R018.
-                // Will populate on V800R019+ firmware. Probing here to detect when it becomes available.
-                'Huawei .51.1.* — DDM table (rx/tx power, V800R019+)' => '1.3.6.1.4.1.2011.6.128.1.1.2.51.1',
+                // Optical DDM — hwGponOntOpticalDdmTable. CONFIRMED on MA5800
+                // V100R022: .51.1.3 = Tx, .51.1.4 = Rx (dBm×100). Returns 0 rows
+                // on MA5683T V800R018.
+                'Huawei .51.1.3 — Tx power (MA5800)'                => '1.3.6.1.4.1.2011.6.128.1.1.2.51.1.3',
+                'Huawei .51.1.4 — Rx power (MA5800)'                => '1.3.6.1.4.1.2011.6.128.1.1.2.51.1.4',
+                // ALTERNATE optical locations to probe on MA5683T / older firmware
+                // (run on the OLT whose .51 table is empty). Whichever returns
+                // negative ~ -8..-30 (rx) and small +1..+3 (tx) values is the one.
+                'Huawei alt .43.1.x — ONT info cols (scan 4..20)'   => '1.3.6.1.4.1.2011.6.128.1.1.2.43.1',
+                'Huawei alt .46.1.x — control cols (scan 1..30)'    => '1.3.6.1.4.1.2011.6.128.1.1.2.46.1',
+                'Huawei alt .102 — hwGponOntDdm? (probe)'           => '1.3.6.1.4.1.2011.6.128.1.1.2.102',
+                'Huawei alt .45 — ONT optical info? (probe)'        => '1.3.6.1.4.1.2011.6.128.1.1.2.45',
+            ],
+            'cdata' => [
+                // C-Data discovery probe. First learn the platform + how ONUs are
+                // exposed, then we map the optical/serial OIDs in config.
+                'sysObjectID (device model OID)'   => '1.3.6.1.2.1.1.2',
+                'sysDescr'                          => '1.3.6.1.2.1.1.1',
+                'ifName (port / ONU interface names — use --limit=0)' => '1.3.6.1.2.1.31.1.1.1.1',
+                'ifOperStatus (ONU online/offline)' => '1.3.6.1.2.1.2.2.1.8',
+                // C-Data enterprise roots — walk with a small limit to see which
+                // sub-tree carries ONU data on this model/firmware.
+                'C-Data ent 17409 ONU tree (probe)' => '1.3.6.1.4.1.17409.2',
+                'C-Data ent 34592 ONU tree (probe)' => '1.3.6.1.4.1.34592',
             ],
             'vsol' => [
                 // ONU online/offline always comes from IF-MIB (the VsolDriver spine).

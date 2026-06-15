@@ -1,0 +1,30 @@
+# systemd service template for the OLT collector (LINUX servers).
+#
+# 1. Edit the paths and User below to match your server.
+# 2. Copy this file to:  /etc/systemd/system/olt-collector.service
+# 3. Run:
+#       sudo systemctl daemon-reload
+#       sudo systemctl enable --now olt-collector
+#       sudo systemctl status olt-collector
+#
+# See README.md "Step 7 (Linux)" for the full walk-through.
+
+[Unit]
+Description=OLT SSH/Telnet Collector (FTTX)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# The Linux user to run as. "www-data" is common for web servers; any
+# non-root user that owns the folder is fine.
+User=www-data
+WorkingDirectory=/opt/olt-collector
+# Loads COLLECTOR_API_KEY etc. from the .env file.
+EnvironmentFile=/opt/olt-collector/.env
+ExecStart=/opt/olt-collector/venv/bin/uvicorn collector:app --host 127.0.0.1 --port 8800
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

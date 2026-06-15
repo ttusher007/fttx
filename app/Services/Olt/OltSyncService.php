@@ -21,6 +21,15 @@ use Throwable;
  */
 class OltSyncService
 {
+    /** Columns written per ONU row in upsertOnus(). */
+    private const ONU_UPSERT_COLUMNS = 16;
+
+    /** MySQL allows 65535 bind placeholders per prepared statement. */
+    private const MYSQL_MAX_PLACEHOLDERS = 65535;
+
+    /** SQLite default bind-parameter ceiling (conservative for tests). */
+    private const SQLITE_MAX_PLACEHOLDERS = 999;
+
     public function __construct(private readonly VendorDriverManager $drivers) {}
 
     /**
@@ -165,14 +174,16 @@ class OltSyncService
             );
         }
 
-        // Single bulk upsert keyed by (olt_id, onu_index).
-        Onu::upsert(
-            $rows,
-            ['olt_id', 'onu_index'],
-            ['olt_port_id', 'serial_number', 'mac_address', 'name', 'description', 'status',
-                'rx_power', 'tx_power', 'distance', 'online_since', 'last_seen_at',
-                'last_synced_at', 'updated_at'],
-        );
+        $uniqueBy = ['olt_id', 'onu_index'];
+        $updateColumns = [
+            'olt_port_id', 'serial_number', 'mac_address', 'name', 'description', 'status',
+            'rx_power', 'tx_power', 'distance', 'online_since', 'last_seen_at',
+            'last_synced_at', 'updated_at',
+        ];
+
+        foreach (array_chunk($rows, $this->onuUpsertBatchSize()) as $chunk) {
+            Onu::upsert($chunk, $uniqueBy, $updateColumns);
+        }
 
         // Prune ONUs that are no longer reported by the OLT (deprovisioned, or
         // left over from an earlier driver that indexed them differently). Safe
@@ -260,12 +271,13 @@ class OltSyncService
 
     private function progress(SyncLog $log, string $message): void
     {
-        $log->update(['message' => $message]);
+        $log->update(['message' => $this->shortenSyncMessage($message)]);
     }
 
     private function finish(Olt $olt, SyncLog $log, SyncStatus $status, string $message, array $stats, float $startedAt, bool $refreshOlt = true): SyncLog
     {
         $durationMs = (int) round((microtime(true) - $startedAt) * 1000);
+        $message = $this->shortenSyncMessage($message);
 
         $log->update([
             'status' => $status,
@@ -285,5 +297,26 @@ class OltSyncService
         }
 
         return $log;
+    }
+
+    private function onuUpsertBatchSize(): int
+    {
+        $max = DB::connection()->getDriverName() === 'sqlite'
+            ? self::SQLITE_MAX_PLACEHOLDERS
+            : self::MYSQL_MAX_PLACEHOLDERS;
+
+        return max(1, intdiv($max, self::ONU_UPSERT_COLUMNS) - 1);
+    }
+
+    /**
+     * Laravel SQL exceptions embed the full query (often megabytes on bulk
+     * upserts). Keep only the human-readable error for sync_logs / OLT status.
+     */
+    private function shortenSyncMessage(string $message): string
+    {
+        $message = preg_replace('/\s*\(Connection:.*$/s', '', $message) ?? $message;
+        $message = preg_replace('/\s*\(SQL:.*$/s', '', $message) ?? $message;
+
+        return mb_substr(trim($message), 0, 2000);
     }
 }

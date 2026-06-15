@@ -34,6 +34,7 @@ class VendorDriverManager
             'huawei' => 'Huawei',
             'bdcom' => 'BDCOM',
             'vsol' => 'VSOL',
+            'cdata' => 'C-Data',
             'generic' => 'Generic / Other',
         ];
     }

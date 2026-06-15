@@ -1,6 +1,7 @@
 <?php
 
 use App\Services\Olt\Drivers\BdcomDriver;
+use App\Services\Olt\Drivers\CDataDriver;
 use App\Services\Olt\Drivers\GenericDriver;
 use App\Services\Olt\Drivers\HuaweiDriver;
 use App\Services\Olt\Drivers\VsolDriver;
@@ -220,6 +221,24 @@ return [
                         'rx_power' => '1.3.6.1.4.1.37950.1.1.5.12.1.28.1.3', // onuRecievePowerTable
                     ],
                 ],
+            ],
+        ],
+
+        'cdata' => [
+            'driver' => CDataDriver::class,
+            'power_divisor' => 100, // typical for C-Data (dBm × 100); confirm on hardware
+            'distance_unit' => 'm',
+
+            // Placeholder: ONU online/offline + ports still come from standard
+            // MIBs. C-Data enterprise is 17409 (some V3 firmwares use 34592) and
+            // the ONU/optical tree varies by model — run `php artisan olt:snmp-debug
+            // {id}` (ships a C-Data discovery probe), then fill these OIDs and, if
+            // the table is indexed by [pon.onu], the gpon/epon overrides below.
+            'oids' => [],
+
+            'pon_types' => [
+                'gpon' => ['oids' => []],
+                'epon' => ['oids' => []],
             ],
         ],
 

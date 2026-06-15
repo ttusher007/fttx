@@ -80,11 +80,12 @@ class VsolDriver extends AbstractVendorDriver
         // Vendor enrichment tables (config-driven, pon_type aware). Each is
         // indexed by "pon.onu", matching the ifDescr-derived key below.
         $oids     = $this->oids();
-        $serials  = isset($oids['serial'])   ? $client->walk($oids['serial'])   : [];
-        $macs     = isset($oids['mac'])      ? $client->walk($oids['mac'])      : [];
-        $rx       = isset($oids['rx_power']) ? $client->walk($oids['rx_power']) : [];
-        $tx       = isset($oids['tx_power']) ? $client->walk($oids['tx_power']) : [];
-        $dist     = isset($oids['distance']) ? $client->walk($oids['distance']) : [];
+        $serials  = isset($oids['serial'])      ? $client->walk($oids['serial'])      : [];
+        $macs     = isset($oids['mac'])         ? $client->walk($oids['mac'])         : [];
+        $rx       = isset($oids['rx_power'])    ? $client->walk($oids['rx_power'])    : [];
+        $tx       = isset($oids['tx_power'])    ? $client->walk($oids['tx_power'])    : [];
+        $dist     = isset($oids['distance'])    ? $client->walk($oids['distance'])    : [];
+        $descs    = isset($oids['description']) ? $client->walk($oids['description']) : [];
 
         $client->close();
 
@@ -123,7 +124,9 @@ class VsolDriver extends AbstractVendorDriver
                 serialNumber: $this->normaliseSerial($serials[$key] ?? null),
                 macAddress:   $this->normaliseMac($macs[$key] ?? null),
                 name:         $onuName,
-                description:  $this->cleanText($alias[$ifIndex] ?? null),
+                // Prefer the vendor ONU description (keyed by pon.onu); fall back
+                // to IF-MIB ifAlias (often blank on VSOL).
+                description:  $this->cleanText($descs[$key] ?? null) ?? $this->cleanText($alias[$ifIndex] ?? null),
                 status:       $status,
                 rxPower:      $this->parsePower($rx[$key] ?? null),
                 txPower:      $this->parsePower($tx[$key] ?? null),

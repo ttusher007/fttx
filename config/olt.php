@@ -173,41 +173,45 @@ return [
             'power_divisor' => 1,
             'distance_unit' => 'm',
 
-            // No default ONU map: ONU online/offline always comes from IF-MIB
-            // (ifDescr "GPONxxONUyy" / ifOperStatus) in VsolDriver. The vendor
-            // tables below ENRICH that spine (serial, power, mac, distance),
-            // joined by the "pon.onu" index. They were derived from the VSOL
-            // V1600D MIB (enterprise 37950, devices=5). Confirm the exact tree
-            // and value formats on your firmware with `php artisan olt:snmp-debug`.
-            'oids' => [],
+            // ONU online/offline always comes from IF-MIB (ifDescr "GPONxxONUyy"
+            // / ifOperStatus) in VsolDriver; the OID map ENRICHES that spine
+            // (serial, power, description, …), joined by the "pon.onu" index.
+            //
+            // DEFAULT = the V1600G GPON tree (.6.1.1.*), CONFIRMED on AFTABNAGAR
+            // V2.1.16: gOnuDetailInfoSn (.6.1.1.4.1.5) returned 559 serials. This
+            // is the default so a VSOL OLT with no pon_type set still gets data
+            // (most VSOL units here are GPON). The older V1600D tree (.5.12.*)
+            // returned 0 rows on this firmware and is NOT used.
+            'oids' => [
+                'serial'      => '1.3.6.1.4.1.37950.1.1.6.1.1.4.1.5',  // gOnuDetailInfoSn (CONFIRMED)
+                'description' => '1.3.6.1.4.1.37950.1.1.6.1.1.4.1.24', // gOnuDetailInfoOnuDesc
+                // Optical (gOnuOpticalInfoTable .6.1.1.3): col 6 txPwr, col 7 rxPwr.
+                // Returned 0 rows on V2.1.16 (ONU optical may not be exposed on this
+                // firmware) — wired so it populates automatically when available.
+                'tx_power'    => '1.3.6.1.4.1.37950.1.1.6.1.1.3.1.6',
+                'rx_power'    => '1.3.6.1.4.1.37950.1.1.6.1.1.3.1.7',
+            ],
 
             'pon_types' => [
-                // VSOL V1600D GPON. Tables live under onuInfo (.5.12.2.1) and
-                // onuAuth (.5.12.1); all are indexed by [ponIndex, onuIndex].
+                // VSOL V1600G GPON — confirmed tree (see default oids above).
                 'gpon' => [
                     'power_divisor' => 1,
                     'oids' => [
-                        // onuSnInfoTable.onuID  (.5.12.2.1.2 col 5) — GPON serial
-                        'serial'   => '1.3.6.1.4.1.37950.1.1.5.12.2.1.2.1.5',
-                        // opmDiagInfoTable (.5.12.2.1.8): col 6 txPower, col 7 rxPower
-                        'tx_power' => '1.3.6.1.4.1.37950.1.1.5.12.2.1.8.1.6',
-                        'rx_power' => '1.3.6.1.4.1.37950.1.1.5.12.2.1.8.1.7',
-                        // onuMacTable.onuMacAddress (.5.12.1.26 col 5)
-                        'mac'      => '1.3.6.1.4.1.37950.1.1.5.12.1.26.1.5',
-                        // onuRttTable.onuRttValue (.5.12.1.17 col 3) — ranging distance.
-                        // Raw is firmware-dependent (often metres already); confirm scaling.
-                        'distance' => '1.3.6.1.4.1.37950.1.1.5.12.1.17.1.3',
+                        'serial'      => '1.3.6.1.4.1.37950.1.1.6.1.1.4.1.5',
+                        'description' => '1.3.6.1.4.1.37950.1.1.6.1.1.4.1.24',
+                        'tx_power'    => '1.3.6.1.4.1.37950.1.1.6.1.1.3.1.6',
+                        'rx_power'    => '1.3.6.1.4.1.37950.1.1.6.1.1.3.1.7',
                     ],
                 ],
-                // VSOL V1600D EPON. EPON identifies ONUs by MAC; status/mac come
-                // from onuListTable (.5.12.1.9), optical from onuRecievePowerTable.
+                // VSOL EPON (V1600D tree). EPON identifies ONUs by MAC via
+                // onuListTable (.5.12.1.9); optical from onuRecievePowerTable.
+                // UNCONFIRMED — verify with olt:snmp-debug on an EPON unit.
                 'epon' => [
                     'power_divisor' => 1,
                     'oids' => [
                         'serial'   => '1.3.6.1.4.1.37950.1.1.5.12.1.9.1.5', // onuListTable.macAddress
                         'mac'      => '1.3.6.1.4.1.37950.1.1.5.12.1.9.1.5',
-                        'rx_power' => '1.3.6.1.4.1.37950.1.1.5.12.1.28.1.3', // onuRecievePowerTable.onuRecievepower
-                        'tx_power' => '1.3.6.1.4.1.37950.1.1.5.12.2.1.8.1.6', // opmDiagInfoTable.txPower
+                        'rx_power' => '1.3.6.1.4.1.37950.1.1.5.12.1.28.1.3', // onuRecievePowerTable
                     ],
                 ],
             ],

@@ -157,28 +157,23 @@ class SnmpDebugCommand extends Command
             'vsol' => [
                 // ONU online/offline always comes from IF-MIB (the VsolDriver spine).
                 'ifOperStatus (ONU online/offline)'  => '1.3.6.1.2.1.2.2.1.8',
-                'ifAdminStatus'                      => '1.3.6.1.2.1.2.2.1.7',
 
-                // VSOL V1600D ONU tables (enterprise 37950, devices=5), indexed by
-                // [ponIndex.onuIndex]. Derived from the V1600D MIB; this walk
-                // confirms which are populated and their value formats so the
-                // vsol pon_types map in config/olt.php can be finalised.
+                // VSOL V1600G GPON tree (.6.1.1.*) — CONFIRMED on V2.1.16. All
+                // tables indexed by [ponIndex.onuIndex]. Use --limit=0 to see all.
                 //
-                // onuInfo (.5.12.2.1):
-                'VSOL onuSnInfo serial (.2.1.5)'     => '1.3.6.1.4.1.37950.1.1.5.12.2.1.2.1.5',
-                'VSOL onuSnInfo model  (.2.1.4)'     => '1.3.6.1.4.1.37950.1.1.5.12.2.1.2.1.4',
-                'VSOL opmDiag txPower  (.8.1.6)'     => '1.3.6.1.4.1.37950.1.1.5.12.2.1.8.1.6',
-                'VSOL opmDiag rxPower  (.8.1.7)'     => '1.3.6.1.4.1.37950.1.1.5.12.2.1.8.1.7',
-                // onuAuth (.5.12.1):
-                'VSOL onuRtt distance  (.17.1.3)'    => '1.3.6.1.4.1.37950.1.1.5.12.1.17.1.3',
-                'VSOL onuMac address   (.26.1.5)'    => '1.3.6.1.4.1.37950.1.1.5.12.1.26.1.5',
-                'VSOL onuList status   (.9.1.4)'     => '1.3.6.1.4.1.37950.1.1.5.12.1.9.1.4',
-                'VSOL onuRecievePower  (.28.1.3)'    => '1.3.6.1.4.1.37950.1.1.5.12.1.28.1.3',
-
-                // V1600G GPON tree (.6.1.1.*) — only present on V1600G hardware.
-                // Walk these too in case the device uses the newer tree.
-                'VSOL V1600G optical   (.6.1.1.3.1)' => '1.3.6.1.4.1.37950.1.1.6.1.1.3.1',
-                'VSOL V1600G detail SN (.6.1.1.4.1.5)' => '1.3.6.1.4.1.37950.1.1.6.1.1.4.1.5',
+                // gOnuStaInfoTable (.6.1.1.1): col 5 phaseStatus, col 7 description
+                'VSOL sta phaseStatus  (.1.1.5)'  => '1.3.6.1.4.1.37950.1.1.6.1.1.1.1.5',
+                'VSOL sta description  (.1.1.7)'  => '1.3.6.1.4.1.37950.1.1.6.1.1.1.1.7',
+                // gOnuOpticalInfoTable (.6.1.1.3): col 6 txPwr, col 7 rxPwr, col 8 oltRxPwr
+                'VSOL optical txPwr    (.3.1.6)'  => '1.3.6.1.4.1.37950.1.1.6.1.1.3.1.6',
+                'VSOL optical rxPwr    (.3.1.7)'  => '1.3.6.1.4.1.37950.1.1.6.1.1.3.1.7',
+                'VSOL optical oltRxPwr (.3.1.8)'  => '1.3.6.1.4.1.37950.1.1.6.1.1.3.1.8',
+                // gOnuDetailInfoTable (.6.1.1.4): col 5 SN (CONFIRMED), 17 model, 24 desc
+                'VSOL detail SN        (.4.1.5)'  => '1.3.6.1.4.1.37950.1.1.6.1.1.4.1.5',
+                'VSOL detail model     (.4.1.17)' => '1.3.6.1.4.1.37950.1.1.6.1.1.4.1.17',
+                'VSOL detail desc      (.4.1.24)' => '1.3.6.1.4.1.37950.1.1.6.1.1.4.1.24',
+                // gOnuAuthInfoTable (.6.1.1.2): col 5 authInfo (configured SN/pw)
+                'VSOL auth authInfo    (.2.1.5)'  => '1.3.6.1.4.1.37950.1.1.6.1.1.2.1.5',
             ],
             default => [],
         };

@@ -173,6 +173,12 @@ class OltSyncService
                 'rx_power', 'tx_power', 'distance', 'online_since', 'last_seen_at',
                 'last_synced_at', 'updated_at'],
         );
+
+        // Prune ONUs that are no longer reported by the OLT (deprovisioned, or
+        // left over from an earlier driver that indexed them differently). Safe
+        // because this only runs when the fetch returned ONUs (guarded above).
+        $seen = array_map(static fn (OnuInfo $info) => $info->onuIndex, $onus);
+        $olt->onus()->whereNotIn('onu_index', $seen)->delete();
     }
 
     /**

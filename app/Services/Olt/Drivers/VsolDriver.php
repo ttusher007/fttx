@@ -161,6 +161,10 @@ class VsolDriver extends AbstractVendorDriver
     {
         $raw = trim((string) $raw);
 
-        return $raw === '' ? null : $raw;
+        if ($raw === '' || in_array(strtoupper($raw), ['N/A', 'NULL', '-', 'NA'], true)) {
+            return null;
+        }
+
+        return $raw;
     }
 }

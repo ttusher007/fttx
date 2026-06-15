@@ -101,9 +101,15 @@ return [
                 'distance'    => '1.3.6.1.4.1.2011.6.128.1.1.2.46.1.20',
                 // .46.1.23 returns SNMP DateAndTime OctetString (hex) — decoded in HuaweiDriver
                 'online_since' => '1.3.6.1.4.1.2011.6.128.1.1.2.46.1.23',
-                // Optical DDM (rx/tx power) is NOT available via SNMP on MA5683T V800R018.
-                // hwGponOntOpticalDdmTable (.51.1.*) exists only from V800R019+.
-                // Power will show null until firmware is upgraded or a later model is used.
+                // Optical DDM — hwGponOntOpticalDdmTable (.51.1.*). CONFIRMED on
+                // MA5800-X2 V100R022 (2758 rows). Columns are indexed [port.onu]:
+                //   .51.1.1 temperature  .51.1.3 ONT Tx power  .51.1.4 ONT Rx power
+                //   .51.1.5 voltage      .51.1.6 bias current
+                // Tx/Rx are dBm × 100, signed; 2147483647 = offline sentinel (→ null).
+                // NOTE: this table is empty on older MA5683T V800R018 (power stays
+                // null there until the firmware is upgraded).
+                'tx_power'    => '1.3.6.1.4.1.2011.6.128.1.1.2.51.1.3',
+                'rx_power'    => '1.3.6.1.4.1.2011.6.128.1.1.2.51.1.4',
             ],
         ],
 

@@ -27,14 +27,33 @@ from typing import Optional
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 from netmiko import ConnectHandler
+from netmiko.huawei.huawei import HuaweiTelnet
+from netmiko.ssh_dispatcher import CLASS_MAPPER
 
 # The shared secret Laravel must send in the "X-Collector-Key" header.
 # It is read from the environment (set in the .env / systemd file). If it is
 # left as the default, the service still runs but is effectively unprotected —
 # always set a real value in production.
 API_KEY = os.environ.get("COLLECTOR_API_KEY", "change-me")
+SESSION_LOG = os.environ.get("COLLECTOR_SESSION_LOG")  # optional netmiko trace file
 
 app = FastAPI(title="OLT SSH/Telnet Collector", version="1.0")
+
+
+class HuaweiOltTelnet(HuaweiTelnet):
+    """Huawei MA5600/MA5683T telnet login, without auto screen-length in session prep.
+
+    Stock huawei_telnet calls disable_paging() during connect, which fails on
+    many MA5683T builds. generic_telnet does not know Huawei login prompts and
+    only echoes typed text (display + bell + version). This driver fixes both.
+    """
+
+    def session_preparation(self) -> None:
+        self.set_base_prompt()
+
+
+# Register once so ConnectHandler(device_type="huawei_olt_telnet", ...) works.
+CLASS_MAPPER["huawei_olt_telnet"] = HuaweiOltTelnet
 
 
 # ---------------------------------------------------------------------------
@@ -62,22 +81,20 @@ def _device_type(req: OltRequest) -> str:
 
     Recommended values:
       Huawei OLT over SSH    -> "huawei_smartax"
-      Huawei OLT over Telnet -> "generic_telnet" (default; avoids huawei_telnet
-                                session_preparation that sends screen-length and
-                                often fails on MA5683T / old firmware)
-      Legacy override        -> "huawei_telnet"
-      Anything else          -> "generic"  /  "generic_telnet"
+      Huawei OLT over Telnet -> "huawei_olt_telnet" (default)
+      Legacy / debug         -> "huawei_telnet", "generic_telnet"
     """
     if req.device_type:
         return req.device_type
     if req.protocol == "telnet":
-        return "generic_telnet"
+        return "huawei_olt_telnet"
     return "huawei_smartax"
 
 
 def _connect(req: OltRequest):
-    return ConnectHandler(
-        device_type=_device_type(req),
+    device_type = _device_type(req)
+    kwargs = dict(
+        device_type=device_type,
         host=req.host,
         username=req.username,
         password=req.password,
@@ -87,32 +104,24 @@ def _connect(req: OltRequest):
         read_timeout_override=120,
         global_cmd_verify=False,
     )
+    if SESSION_LOG:
+        kwargs["session_log"] = SESSION_LOG
+        kwargs["session_log_record"] = True
+    return ConnectHandler(**kwargs)
 
 
-def _prep_session(conn, protocol: str) -> None:
-    """Disable paging. Uses timing-based reads on telnet (prompt detection is flaky)."""
-    prep_commands = (
-        "screen-length 0 temporary",
-        "screen-length 0",
-        "scroll 512",
-    )
-    for prep in prep_commands:
+def _prep_session(conn, device_type: str) -> None:
+    """Disable paging after login. Failures are ignored (model/firmware vary)."""
+    for prep in ("screen-length 0 temporary", "screen-length 0", "scroll 512"):
         try:
-            if protocol == "telnet":
-                conn.send_command_timing(prep, delay_factor=2, read_timeout=20)
-            else:
-                conn.send_command(prep, read_timeout=15)
+            conn.send_command(prep, read_timeout=20, cmd_verify=False)
         except Exception:
             pass
 
 
-def _send(conn, protocol: str, command: str, read_timeout: int = 90) -> str:
-    if protocol == "telnet":
-        # Timing-based: no prompt regex required (MA5683T telnet prompts vary).
-        return conn.send_command_timing(
-            command, delay_factor=3, read_timeout=read_timeout, last_read=3.0
-        )
-    return conn.send_command(command, read_timeout=read_timeout)
+def _send(conn, device_type: str, command: str, read_timeout: int = 90) -> str:
+    # Netmiko docs: Huawei telnet breaks with send_command_timing — use send_command.
+    return conn.send_command(command, read_timeout=read_timeout, cmd_verify=False)
 
 
 def _auth(key: Optional[str]):
@@ -123,15 +132,15 @@ def _auth(key: Optional[str]):
 def _run_commands(req: OltRequest, commands: list[str]) -> str:
     """Open one session, run several commands, return all output joined."""
     out = []
-    protocol = req.protocol if req.protocol == "telnet" else "ssh"
+    device_type = _device_type(req)
     with _connect(req) as conn:
         try:
             conn.enable()          # harmless if the device has no enable mode
         except Exception:
             pass
-        _prep_session(conn, protocol)
+        _prep_session(conn, device_type)
         for cmd in commands:
-            out.append(f"### {cmd}\n" + _send(conn, protocol, cmd))
+            out.append(f"### {cmd}\n" + _send(conn, device_type, cmd))
     return "\n".join(out)
 
 

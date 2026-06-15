@@ -186,6 +186,7 @@ So it starts on boot and restarts if it crashes:
 ```bash
 # Copy the service template into place
 sudo cp /opt/olt-collector/olt-collector.service /etc/systemd/system/   # if you copied it here
+or sudo cp /var/www/app/fttx/dev_resources/python/olt-collector.service /etc/systemd/system/
 # (or copy it from your project: .../dev_resources/python/olt-collector.service)
 
 # IMPORTANT: open it and check the User= and paths match your server

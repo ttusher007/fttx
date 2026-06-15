@@ -62,13 +62,16 @@ def _device_type(req: OltRequest) -> str:
 
     Recommended values:
       Huawei OLT over SSH    -> "huawei_smartax"
-      Huawei OLT over Telnet -> "huawei_telnet"  (try "generic_telnet" if needed)
+      Huawei OLT over Telnet -> "generic_telnet" (default; avoids huawei_telnet
+                                session_preparation that sends screen-length and
+                                often fails on MA5683T / old firmware)
+      Legacy override        -> "huawei_telnet"
       Anything else          -> "generic"  /  "generic_telnet"
     """
     if req.device_type:
         return req.device_type
     if req.protocol == "telnet":
-        return "huawei_telnet"
+        return "generic_telnet"
     return "huawei_smartax"
 
 
@@ -80,9 +83,36 @@ def _connect(req: OltRequest):
         password=req.password,
         port=req.port or (23 if req.protocol == "telnet" else 22),
         fast_cli=False,
-        conn_timeout=20,
-        read_timeout_override=60,
+        conn_timeout=30,
+        read_timeout_override=120,
+        global_cmd_verify=False,
     )
+
+
+def _prep_session(conn, protocol: str) -> None:
+    """Disable paging. Uses timing-based reads on telnet (prompt detection is flaky)."""
+    prep_commands = (
+        "screen-length 0 temporary",
+        "screen-length 0",
+        "scroll 512",
+    )
+    for prep in prep_commands:
+        try:
+            if protocol == "telnet":
+                conn.send_command_timing(prep, delay_factor=2, read_timeout=20)
+            else:
+                conn.send_command(prep, read_timeout=15)
+        except Exception:
+            pass
+
+
+def _send(conn, protocol: str, command: str, read_timeout: int = 90) -> str:
+    if protocol == "telnet":
+        # Timing-based: no prompt regex required (MA5683T telnet prompts vary).
+        return conn.send_command_timing(
+            command, delay_factor=3, read_timeout=read_timeout, last_read=3.0
+        )
+    return conn.send_command(command, read_timeout=read_timeout)
 
 
 def _auth(key: Optional[str]):
@@ -93,19 +123,15 @@ def _auth(key: Optional[str]):
 def _run_commands(req: OltRequest, commands: list[str]) -> str:
     """Open one session, run several commands, return all output joined."""
     out = []
+    protocol = req.protocol if req.protocol == "telnet" else "ssh"
     with _connect(req) as conn:
         try:
             conn.enable()          # harmless if the device has no enable mode
         except Exception:
             pass
-        # Disable terminal paging so long tables aren't broken by "---- More ----".
-        for prep in ("scroll 512", "screen-length 0 temporary"):
-            try:
-                conn.send_command(prep, read_timeout=15)
-            except Exception:
-                pass
+        _prep_session(conn, protocol)
         for cmd in commands:
-            out.append(f"### {cmd}\n" + conn.send_command(cmd, read_timeout=90))
+            out.append(f"### {cmd}\n" + _send(conn, protocol, cmd))
     return "\n".join(out)
 
 

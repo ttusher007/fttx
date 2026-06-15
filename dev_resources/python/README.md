@@ -372,6 +372,7 @@ can't provide the data.
 | `curl http://127.0.0.1:8800/health` fails | Service not running. Start it (Step 6/7) and check logs. |
 | `401 Bad or missing collector API key`    | The `X-Collector-Key` header doesn't match the `.env` key. |
 | `OLT connection/command failed`           | Wrong protocol/port/credentials. Try `"protocol":"ssh"` ↔ `"telnet"`, add `"port":23`, or `"device_type":"generic_telnet"`. |
+| `Pattern not detected: 'screen-length'`   | Old Huawei telnet firmware. Update `collector.py` (uses `generic_telnet` now) and `sudo systemctl restart olt-collector`. |
 | Telnet logs in but output looks cut off   | Paging. The collector tries to disable it; some models need a different command — tell your developer the model. |
 | `ModuleNotFoundError`                      | The venv isn't active or libraries weren't installed. `source venv/bin/activate` then `pip install -r requirements.txt`. |
 

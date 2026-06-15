@@ -22,11 +22,11 @@ class OltCollectorClient
      *
      * @return array{command?:string, output:string}
      */
-    public function raw(Olt $olt, string $command, string $protocol = 'ssh', ?int $port = null): array
+    public function raw(Olt $olt, string $command, string $protocol = 'ssh', ?int $port = null, ?string $deviceType = null): array
     {
         return $this->post('/raw', $this->payload($olt, $protocol, $port, [
             'command' => $command,
-        ]));
+        ], $deviceType));
     }
 
     /**
@@ -34,12 +34,12 @@ class OltCollectorClient
      *
      * @return array{command:string, rows:array<int,array<string,mixed>>, raw:string}
      */
-    public function optical(Olt $olt, ?string $frameSlotPort = null, ?int $ontId = null, string $protocol = 'ssh', ?int $port = null): array
+    public function optical(Olt $olt, ?string $frameSlotPort = null, ?int $ontId = null, string $protocol = 'ssh', ?int $port = null, ?string $deviceType = null): array
     {
         return $this->post('/onu/optical', $this->payload($olt, $protocol, $port, array_filter([
             'frame_slot_port' => $frameSlotPort,
             'ont_id' => $ontId,
-        ], fn ($v) => $v !== null)));
+        ], fn ($v) => $v !== null), $deviceType));
     }
 
     /**
@@ -47,12 +47,12 @@ class OltCollectorClient
      *
      * @return array{command:string, rows:array<int,array<string,mixed>>, raw:string}
      */
-    public function mac(Olt $olt, ?string $frameSlotPort = null, ?int $ontId = null, string $protocol = 'ssh', ?int $port = null): array
+    public function mac(Olt $olt, ?string $frameSlotPort = null, ?int $ontId = null, string $protocol = 'ssh', ?int $port = null, ?string $deviceType = null): array
     {
         return $this->post('/onu/mac', $this->payload($olt, $protocol, $port, array_filter([
             'frame_slot_port' => $frameSlotPort,
             'ont_id' => $ontId,
-        ], fn ($v) => $v !== null)));
+        ], fn ($v) => $v !== null), $deviceType));
     }
 
     /** Liveness check — true if the collector service answers. */
@@ -71,7 +71,7 @@ class OltCollectorClient
      * @param  array<string,mixed>  $extra
      * @return array<string,mixed>
      */
-    private function payload(Olt $olt, string $protocol, ?int $port, array $extra): array
+    private function payload(Olt $olt, string $protocol, ?int $port, array $extra, ?string $deviceType = null): array
     {
         if (blank($olt->ssh_username) || blank($olt->ssh_password)) {
             throw new RuntimeException("OLT #{$olt->id} has no SSH username/password set — fill them on the OLT edit page.");
@@ -79,13 +79,14 @@ class OltCollectorClient
 
         $protocol = $protocol === 'telnet' ? 'telnet' : 'ssh';
 
-        return array_merge([
+        return array_merge(array_filter([
             'host' => $olt->ip_address,
             'username' => $olt->ssh_username,
             'password' => $olt->ssh_password,            // decrypted by the model cast
             'protocol' => $protocol,
             'port' => $port ?? ($protocol === 'telnet' ? 23 : (int) ($olt->ssh_port ?: 22)),
-        ], $extra);
+            'device_type' => $deviceType,
+        ], fn ($v) => $v !== null), $extra);
     }
 
     /**

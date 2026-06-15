@@ -26,6 +26,7 @@ class OltCollectCommand extends Command
         {--mac : Fetch parsed CPE/user MAC addresses}
         {--protocol=ssh : ssh or telnet}
         {--port= : Override the TCP port (default 22 ssh / 23 telnet)}
+        {--device-type= : Netmiko driver override, e.g. generic_telnet or huawei_telnet}
         {--fsp= : Frame/slot/port for Huawei, e.g. 0/1/0}
         {--ont= : ONT id (optional, narrows to one ONU)}';
 
@@ -40,6 +41,7 @@ class OltCollectCommand extends Command
 
         $protocol = $this->option('protocol') === 'telnet' ? 'telnet' : 'ssh';
         $port = $this->option('port') !== null ? (int) $this->option('port') : null;
+        $deviceType = $this->option('device-type') ?: null;
         $fsp = $this->option('fsp');
         $ont = $this->option('ont') !== null ? (int) $this->option('ont') : null;
 
@@ -54,9 +56,9 @@ class OltCollectCommand extends Command
 
         try {
             [$label, $result] = match (true) {
-                $this->option('optical') => ['optical', $collector->optical($olt, $fsp, $ont, $protocol, $port)],
-                $this->option('mac') => ['mac', $collector->mac($olt, $fsp, $ont, $protocol, $port)],
-                (bool) $this->option('raw') => ['raw', $collector->raw($olt, (string) $this->option('raw'), $protocol, $port)],
+                $this->option('optical') => ['optical', $collector->optical($olt, $fsp, $ont, $protocol, $port, $deviceType)],
+                $this->option('mac') => ['mac', $collector->mac($olt, $fsp, $ont, $protocol, $port, $deviceType)],
+                (bool) $this->option('raw') => ['raw', $collector->raw($olt, (string) $this->option('raw'), $protocol, $port, $deviceType)],
                 default => throw new \InvalidArgumentException('Pass one of --raw="…", --optical, or --mac.'),
             };
         } catch (Throwable $e) {

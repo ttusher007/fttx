@@ -73,17 +73,46 @@ def _is_huawei_telnet(device_type: str) -> bool:
     return device_type in ("huawei_olt_telnet", "huawei_telnet")
 
 
-def _huawei_telnet_line(command: str) -> str:
+def _huawei_telnet_line(command: str, style: str = "space") -> str:
     """Build a command line for MA5683T telnet.
 
-    On this firmware, a SPACE after the first word triggers tab-completion (bell /
-    early execute) so 'display version' becomes just 'display'. Use TAB between
-    words instead — same as typing display<TAB>version<ENTER> on the console.
+    style="space" (default): the normal way — words separated by spaces, then
+        ENTER. Correct for multi-word commands like
+        'display ont optical-info 0/1 0 all'.
+    style="tab": send TAB between words instead of space. Only needed on odd
+        firmware where a space triggers early tab-completion; can itself pop up
+        completion menus on multi-word commands, so it is NOT the default.
     """
-    parts = command.strip().split()
-    if len(parts) <= 1:
-        return parts[0] + "\r" if parts else "\r"
-    return parts[0] + "".join("\t" + p for p in parts[1:]) + "\r"
+    command = command.strip()
+    if style == "tab":
+        parts = command.split()
+        if len(parts) <= 1:
+            return (parts[0] if parts else "") + "\r"
+        return parts[0] + "".join("\t" + p for p in parts[1:]) + "\r"
+    return command + "\r"
+
+
+def _strip_async_alarms(text: str) -> str:
+    """Remove Huawei async alarm/event blocks the OLT prints into the session.
+
+    These start with a line like '! FAULT MINOR ...' followed by indented
+    continuation lines (ALARM NAME / PARAMETERS / ...). They corrupt command
+    output, so we drop the whole block. (We also try to suppress them at the
+    source with 'undo alarm output all' during session prep.)
+    """
+    cleaned = []
+    in_alarm = False
+    for line in text.splitlines():
+        if re.match(r"^\s*!\s*(FAULT|RESUME|ALARM|EVENT|NOTIFICATION)", line, re.IGNORECASE):
+            in_alarm = True
+            continue
+        if in_alarm:
+            # Continuation lines are blank or indented; a non-indented line ends it.
+            if line.strip() == "" or line[:1].isspace():
+                continue
+            in_alarm = False
+        cleaned.append(line)
+    return "\n".join(cleaned)
 
 
 def _drain_channel(conn, seconds: float = 1.5) -> str:

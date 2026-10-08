@@ -26,6 +26,14 @@
         </div>
         <div class="flex flex-wrap gap-2">
             @can('olt.update')<a href="{{ route('olts.edit', $olt) }}" wire:navigate class="btn-secondary">Edit</a>@endcan
+            @can('olt.diagnose')<a href="{{ route('diagnostics.index', ['olt' => $olt->id]) }}" wire:navigate class="btn-secondary">Diagnostics</a>@endcan
+            @if ($olt->cli_enabled)
+                @can('olt.sync')
+                    <button wire:click="runCliEnrich" wire:loading.attr="disabled" wire:target="runCliEnrich" class="btn-secondary" title="Queue an SSH/Telnet pass for optical power + customer MACs">
+                        CLI enrich
+                    </button>
+                @endcan
+            @endif
             <button wire:click="testConnection" wire:loading.attr="disabled" class="btn-secondary">
                 <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" wire:loading.class="animate-pulse" wire:target="testConnection"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
                 <span wire:loading.remove wire:target="testConnection">Test connection</span>
@@ -118,6 +126,23 @@
         <span class="text-slate-500">{{ $olt->last_sync_message }}</span>
     </div>
 
+    @if ($olt->cli_enabled)
+        <div class="card flex flex-col gap-1 p-4 text-sm sm:flex-row sm:items-center sm:justify-between">
+            <span class="text-slate-500">
+                CLI enrichment ({{ strtoupper($olt->cli_protocol ?? 'ssh') }}, every {{ $olt->effectiveCliInterval() }} min):
+                <span class="font-medium text-slate-700">{{ $olt->cli_last_synced_at?->diffForHumans() ?? 'never run' }}</span>
+                @if ($olt->cli_last_status)
+                    · <x-badge :color="match($olt->cli_last_status) { 'success' => 'emerald', 'failed' => 'red', default => 'slate' }">{{ ucfirst($olt->cli_last_status) }}</x-badge>
+                @endif
+            </span>
+            <span class="truncate text-slate-500" title="{{ $olt->cli_last_message }}">{{ \Illuminate\Support\Str::limit($olt->cli_last_message, 140) }}</span>
+        </div>
+    @endif
+
+    @if (session('status'))
+        <div class="rounded-lg border border-indigo-200 bg-indigo-50 px-4 py-3 text-sm text-indigo-800">{{ session('status') }}</div>
+    @endif
+
     {{-- Stats --}}
     <div class="grid grid-cols-2 gap-4 lg:grid-cols-4">
         <x-stat label="PON Ports" :value="$activePortCount" tone="indigo" icon="olt" />
@@ -172,7 +197,7 @@
                     <th class="px-4 py-3">PON Port</th>
                     <th class="px-4 py-3">ONU Port</th>
                     <th class="px-4 py-3">Status</th>
-                    <th class="px-4 py-3">↓OLT→ONU / ↑ONU→OLT (dBm)</th>
+                    <th class="px-4 py-3" title="ONU Rx / ONU Tx / OLT Rx (dBm)">↓ONU Rx / ↑ONU Tx · OLT Rx (dBm)</th>
                     <th class="px-4 py-3">Distance</th>
                     <th class="px-4 py-3">Live since</th>
                     <th class="px-4 py-3"></th>
@@ -183,11 +208,23 @@
                     <tr wire:key="onu-d-{{ $onu->id }}" class="hover:bg-slate-50">
                         <td class="px-4 py-3">
                             <p class="font-medium text-slate-800">{{ $onu->serial_number ?: '—' }}</p>
-                            <p class="text-xs text-slate-400">{{ $onu->mac_address ?: 'no MAC' }} · {{ $onu->description }}</p>
+                            <p class="text-xs text-slate-400">
+                                <span title="Customer router MAC{{ $onu->mac_source ? ' (via '.$onu->mac_source.')' : '' }}">{{ $onu->mac_address ?: 'no router MAC' }}</span>
+                                @if ($onu->mac_count && $onu->mac_count > 1)<span class="rounded bg-slate-100 px-1 text-[10px]" title="{{ $onu->mac_count }} MACs learned behind this ONU">+{{ $onu->mac_count - 1 }}</span>@endif
+                                @if ($onu->description) · {{ $onu->description }} @endif
+                            </p>
+                            @if ($onu->model || $onu->onu_mac)
+                                <p class="text-[11px] text-slate-400">{{ $onu->model }}@if($onu->model && $onu->onu_mac) · @endif<span title="ONU's own MAC">{{ $onu->onu_mac }}</span></p>
+                            @endif
                         </td>
                         <td class="px-4 py-3 text-slate-500">{{ $onu->port?->name ?: '—' }}</td>
                         <td class="px-4 py-3 text-slate-500">{{ $onu->name ?: $onu->onu_index }}</td>
-                        <td class="px-4 py-3"><x-badge :color="$onu->status->color()">{{ $onu->status->label() }}</x-badge></td>
+                        <td class="px-4 py-3">
+                            <x-badge :color="$onu->status->color()">{{ $onu->status->label() }}</x-badge>
+                            @if ($onu->status !== \App\Enums\OnuStatus::Online && ($onu->last_down_at || $onu->last_down_cause))
+                                <p class="mt-1 text-[11px] text-slate-400" title="{{ $onu->last_down_at?->toDateTimeString() }}">{{ $onu->last_down_cause }}@if($onu->last_down_at) · {{ $onu->last_down_at->diffForHumans() }}@endif</p>
+                            @endif
+                        </td>
                         <td class="px-4 py-3">
                             @include('livewire.olts.partials.power', ['onu' => $onu])
                         </td>
@@ -212,7 +249,8 @@
                     <div class="flex items-start justify-between gap-2">
                         <div class="min-w-0">
                             <p class="truncate font-medium text-slate-800">{{ $onu->serial_number ?: '—' }}</p>
-                            <p class="truncate text-xs text-slate-400">{{ $onu->mac_address ?: 'no MAC' }}</p>
+                            <p class="truncate text-xs text-slate-400">{{ $onu->mac_address ?: 'no router MAC' }}@if($onu->mac_count && $onu->mac_count > 1) +{{ $onu->mac_count - 1 }}@endif</p>
+                            @if ($onu->model || $onu->onu_mac)<p class="truncate text-[11px] text-slate-400">{{ $onu->model }}@if($onu->model && $onu->onu_mac) · @endif{{ $onu->onu_mac }}</p>@endif
                         </div>
                         <x-badge :color="$onu->status->color()">{{ $onu->status->label() }}</x-badge>
                     </div>
@@ -220,6 +258,9 @@
                         <span>PON Port<br><span class="font-medium text-slate-700">{{ $onu->port?->name ?: '—' }}</span></span>
                         <span>ONU Port<br><span class="font-medium text-slate-700">{{ $onu->name ?: $onu->onu_index }}</span></span>
                     </div>
+                    @if ($onu->status !== \App\Enums\OnuStatus::Online && ($onu->last_down_at || $onu->last_down_cause))
+                        <p class="mt-1 text-[11px] text-slate-400">Last down: {{ $onu->last_down_cause }}@if($onu->last_down_at) · {{ $onu->last_down_at->diffForHumans() }}@endif</p>
+                    @endif
                     <div class="mt-1 grid grid-cols-2 gap-2 text-xs text-slate-500">
                         <span>Power<br>@include('livewire.olts.partials.power', ['onu' => $onu])</span>
                         <span>Distance<br><span class="font-medium text-slate-700">{{ $onu->distance ? number_format($onu->distance).' m' : '—' }}</span></span>

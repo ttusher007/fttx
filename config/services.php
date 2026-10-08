@@ -40,7 +40,9 @@ return [
     'olt_collector' => [
         'url' => env('OLT_COLLECTOR_URL', 'http://127.0.0.1:8800'),
         'key' => env('OLT_COLLECTOR_KEY'),
-        'timeout' => (int) env('OLT_COLLECTOR_TIMEOUT', 300),
+        // Seconds Laravel waits for one collector call. A full MA5683T MAC +
+        // optical pass over 16 ports can take 10+ minutes over Telnet.
+        'timeout' => (int) env('OLT_COLLECTOR_TIMEOUT', 1500),
     ],
 
 ];

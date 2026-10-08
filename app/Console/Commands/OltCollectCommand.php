@@ -3,47 +3,45 @@
 namespace App\Console\Commands;
 
 use App\Models\Olt;
+use App\Services\Olt\Cli\OltCliEnrichService;
 use App\Services\Olt\OltCollectorClient;
 use Illuminate\Console\Command;
 use Throwable;
 
 /**
- * Calls the Python SSH/Telnet collector from Laravel. Mirrors olt:snmp-debug:
- * a discovery/test tool that runs a command (or the parsed optical/mac jobs)
- * against an OLT and saves the output to dev_resources/debug/.
+ * Calls the Python SSH/Telnet collector from Laravel. A discovery/test tool:
+ * runs raw commands, or the vendor CLI enrichment profile, against an OLT and
+ * saves the output to dev_resources/debug/. The same actions are available in
+ * the browser on the Diagnostics page.
  *
  * Examples:
  *   php artisan olt:collect 10 --raw="display version" --protocol=telnet
- *   php artisan olt:collect 10 --optical --fsp=0/1/0 --protocol=telnet
- *   php artisan olt:collect 10 --mac --protocol=telnet
+ *   php artisan olt:collect 10 --raw="display board 0" --raw="display ont info 0/1/0 all" --prep
+ *   php artisan olt:collect 10 --enrich            # dry run of the CLI profile
+ *   php artisan olt:collect 10 --enrich --save     # and write the parsed values
  */
 class OltCollectCommand extends Command
 {
     protected $signature = 'olt:collect
         {olt : OLT id or IP address}
-        {--raw= : Run this CLI command on the OLT and print the raw text}
-        {--optical : Fetch parsed ONT optical power}
-        {--mac : Fetch parsed CPE/user MAC addresses}
-        {--protocol=ssh : ssh or telnet}
-        {--port= : Override the TCP port (default 22 ssh / 23 telnet)}
-        {--device-type= : Netmiko driver override, e.g. generic_telnet or huawei_telnet}
-        {--fsp= : Frame/slot/port for Huawei, e.g. 0/1/0}
-        {--ont= : ONT id (optional, narrows to one ONU)}';
+        {--raw=* : Run these CLI commands (repeatable) and print the raw text}
+        {--prep : Also run the vendor prep commands (enable, disable paging…) before --raw commands}
+        {--enrich : Run the vendor CLI enrichment profile (optical + MACs) and show the parsed rows}
+        {--save : With --enrich, persist the parsed values to the ONUs}
+        {--protocol= : ssh or telnet (default: the OLT\'s cli_protocol)}
+        {--port= : Override the TCP port}';
 
-    protected $description = 'Hit the Python OLT collector (SSH/Telnet) for raw output, optical power, or MACs.';
+    protected $description = 'Hit the Python OLT collector (SSH/Telnet) for raw output or the CLI enrichment profile.';
 
-    public function handle(OltCollectorClient $collector): int
+    public function handle(OltCollectorClient $collector, OltCliEnrichService $enrich): int
     {
         $arg = $this->argument('olt');
         $olt = is_numeric($arg)
             ? Olt::findOrFail((int) $arg)
             : Olt::where('ip_address', $arg)->firstOrFail();
 
-        $protocol = $this->option('protocol') === 'telnet' ? 'telnet' : 'ssh';
+        $protocol = $this->option('protocol') ?: ($olt->cli_protocol ?: 'ssh');
         $port = $this->option('port') !== null ? (int) $this->option('port') : null;
-        $deviceType = $this->option('device-type') ?: null;
-        $fsp = $this->option('fsp');
-        $ont = $this->option('ont') !== null ? (int) $this->option('ont') : null;
 
         $this->info("OLT: {$olt->name} ({$olt->ip_address}) via {$protocol}");
 
@@ -54,34 +52,55 @@ class OltCollectCommand extends Command
             return self::FAILURE;
         }
 
+        $text = '';
+        $label = 'raw';
+
         try {
-            [$label, $result] = match (true) {
-                $this->option('optical') => ['optical', $collector->optical($olt, $fsp, $ont, $protocol, $port, $deviceType)],
-                $this->option('mac') => ['mac', $collector->mac($olt, $fsp, $ont, $protocol, $port, $deviceType)],
-                (bool) $this->option('raw') => ['raw', $collector->raw($olt, (string) $this->option('raw'), $protocol, $port, $deviceType)],
-                default => throw new \InvalidArgumentException('Pass one of --raw="…", --optical, or --mac.'),
-            };
+            if ($this->option('enrich')) {
+                $label = 'enrich';
+                $result = $enrich->collect($olt);
+                $stats = $this->option('save') ? $enrich->persist($olt, $result) : null;
+
+                foreach ($result->notes as $note) {
+                    $this->line("  · {$note}");
+                }
+                if ($stats) {
+                    $this->info("Saved: {$stats['updated']} ONU rows updated, {$stats['unmatched']} unmatched.");
+                }
+                if ($result->rows) {
+                    $this->table(['port_id', 'ont', 'rx', 'tx', 'oltRx', 'macs'], array_map(fn ($r) => [
+                        $r['port_id'], $r['ont_id'], $r['rx_power'] ?? '—', $r['tx_power'] ?? '—', $r['olt_rx_power'] ?? '—', implode(', ', $r['macs'] ?? []),
+                    ], array_slice($result->rows, 0, 50)));
+                }
+                $text = json_encode(['notes' => $result->notes, 'rows' => $result->rows, 'outputs' => $result->outputs, 'login_log' => $result->loginLog], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+            } else {
+                $commands = array_values(array_filter((array) $this->option('raw')));
+                if (empty($commands)) {
+                    throw new \InvalidArgumentException('Pass --raw="<command>" (repeatable) or --enrich.');
+                }
+                $prep = $this->option('prep') ? (array) config("olt.cli.vendors.{$olt->vendor}.prep", []) : [];
+                $res = $collector->run($olt, $commands, $prep, ['protocol' => $protocol, 'port' => $port]);
+
+                $this->line('Prompt: '.($res['prompt'] ?? '?').'  total '.($res['duration_ms'] ?? '?').' ms');
+                foreach ($res['outputs'] ?? [] as $out) {
+                    $this->newLine();
+                    $this->comment('### '.$out['command'].(! empty($out['error']) ? '  ERROR: '.$out['error'] : ''));
+                    $this->line($out['output']);
+                }
+                $text = json_encode($res, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+            }
         } catch (Throwable $e) {
             $this->error($e->getMessage());
 
             return self::FAILURE;
         }
 
-        // Show parsed rows as a table when present.
-        if (! empty($result['rows'])) {
-            $rows = $result['rows'];
-            $this->table(array_keys((array) $rows[0]), array_map(fn ($r) => array_map(
-                fn ($v) => is_null($v) ? '—' : (string) $v, (array) $r
-            ), $rows));
-        }
-
-        // Persist the full payload (incl. raw text) for inspection / sharing.
         $outDir = base_path('dev_resources/debug');
         if (! is_dir($outDir)) {
             mkdir($outDir, 0755, true);
         }
         $file = $outDir.DIRECTORY_SEPARATOR."collect_{$label}_olt{$olt->id}_".now()->format('Ymd_His').'.txt';
-        file_put_contents($file, json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES)."\n");
+        file_put_contents($file, $text."\n");
 
         $this->info('Saved → dev_resources/debug/'.basename($file));
 

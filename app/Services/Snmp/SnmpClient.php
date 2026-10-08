@@ -17,6 +17,13 @@ class SnmpClient
 {
     private SNMP $session;
 
+    /**
+     * Human-readable reason the last walk()/get() returned nothing (timeout,
+     * noSuchObject, ...). Null when the last call succeeded. Surfaced by the
+     * diagnostics page so "0 rows" can be told apart from "device timed out".
+     */
+    public ?string $lastError = null;
+
     public function __construct(
         private readonly string $host,
         private readonly int $port,
@@ -58,9 +65,12 @@ class SnmpClient
     }
 
     /**
-     * Build a client straight from an OLT model + app config.
+     * Build a client straight from an OLT model + app config. The optional
+     * overrides let callers open a "slow" session (longer timeout, smaller
+     * GETBULK window) for tables the OLT computes on demand, such as Huawei's
+     * per-ONT optical DDM table.
      */
-    public static function forOlt(Olt $olt): self
+    public static function forOlt(Olt $olt, ?int $timeoutMicros = null, ?int $retries = null, ?int $maxRepetitions = null): self
     {
         $cfg = config('olt.snmp');
 
@@ -69,9 +79,9 @@ class SnmpClient
             port: (int) $olt->snmp_port,
             version: $olt->snmp_version,
             community: (string) $olt->snmp_community,
-            timeout: (int) $cfg['timeout'],
-            retries: (int) $cfg['retries'],
-            maxRepetitions: (int) $cfg['max_repetitions'],
+            timeout: $timeoutMicros ?? (int) $cfg['timeout'],
+            retries: $retries ?? (int) $cfg['retries'],
+            maxRepetitions: $maxRepetitions ?? (int) $cfg['max_repetitions'],
             v3: [
                 'sec_name' => $olt->snmp_sec_name,
                 'auth_protocol' => $olt->snmp_auth_protocol,
@@ -87,11 +97,21 @@ class SnmpClient
      */
     public function get(string $oid): ?string
     {
+        $this->lastError = null;
+
         try {
             $value = $this->session->get($oid);
 
-            return $value === false ? null : $this->cleanValue($value);
+            if ($value === false) {
+                $this->lastError = $this->sessionError();
+
+                return null;
+            }
+
+            return $this->cleanValue($value);
         } catch (Throwable $e) {
+            $this->lastError = $e->getMessage();
+
             return null;
         }
     }
@@ -103,20 +123,26 @@ class SnmpClient
      * OID — e.g. walking ...43.1.3 with a leaf ...43.1.3.4194304512.0 yields
      * index "4194304512.0". GETBULK is used on v2c/v3 for speed.
      *
+     * @param  int|null  $maxRepetitions  GETBULK window override for this walk only
      * @return array<string, string>
      */
-    public function walk(string $baseOid): array
+    public function walk(string $baseOid, ?int $maxRepetitions = null): array
     {
+        $this->lastError = null;
         $base = ltrim($baseOid, '.');
 
         try {
             // walk() uses GETBULK automatically for v2c/v3 with max_oids.
-            $raw = $this->session->walk($baseOid, false, $this->maxRepetitions);
+            $raw = $this->session->walk($baseOid, false, $maxRepetitions ?? $this->maxRepetitions);
         } catch (Throwable $e) {
+            $this->lastError = $e->getMessage();
+
             return [];
         }
 
         if ($raw === false) {
+            $this->lastError = $this->sessionError();
+
             return [];
         }
 
@@ -147,6 +173,18 @@ class SnmpClient
         } catch (Throwable) {
             // already closed
         }
+    }
+
+    private function sessionError(): string
+    {
+        try {
+            $err = $this->session->getError();
+            $no = $this->session->getErrno();
+        } catch (Throwable) {
+            return 'unknown SNMP error';
+        }
+
+        return trim(($err ?: 'SNMP request failed')." (errno {$no})");
     }
 
     /**

@@ -99,6 +99,15 @@ class OltSimulator
                     onlineSince: $status === OnuStatus::Online
                         ? Carbon::now()->subMinutes(mt_rand(5, 86_400))
                         : null,
+                    oltRxPower: $status === OnuStatus::Online
+                        ? round(-18 - (mt_rand(0, 1000) / 100), 2)   // -18 .. -28 dBm at the OLT
+                        : null,
+                    onuMac: $this->fakeMac(),
+                    macCount: $status === OnuStatus::Online ? mt_rand(1, 4) : null,
+                    macSource: 'snmp',
+                    model: ['HG8546M', 'HG8010H', 'EG8141A5', 'XPON-ONU', 'V2802GW'][mt_rand(0, 4)],
+                    lastDownAt: $status === OnuStatus::Online ? null : Carbon::now()->subMinutes(mt_rand(5, 20_000)),
+                    lastDownCause: $status === OnuStatus::Online ? null : ['LOS', 'Dying gasp (power off)', 'ONT reset'][mt_rand(0, 2)],
                 );
             }
         }

@@ -9,6 +9,7 @@ use App\Models\Onu;
 use App\Models\SyncLog;
 use App\Services\Olt\Data\OnuInfo;
 use App\Services\Olt\Data\PortInfo;
+use App\Services\Olt\Drivers\AbstractVendorDriver;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -21,14 +22,20 @@ use Throwable;
  */
 class OltSyncService
 {
-    /** Columns written per ONU row in upsertOnus(). */
-    private const ONU_UPSERT_COLUMNS = 16;
-
     /** MySQL allows 65535 bind placeholders per prepared statement. */
     private const MYSQL_MAX_PLACEHOLDERS = 65535;
 
     /** SQLite default bind-parameter ceiling (conservative for tests). */
     private const SQLITE_MAX_PLACEHOLDERS = 999;
+
+    /**
+     * Columns that CLI enrichment also writes. When SNMP returned none of
+     * these for an OLT that has CLI enabled, we leave them untouched so the
+     * (slower) CLI values are not wiped every SNMP cycle.
+     */
+    private const OPTICAL_COLUMNS = ['rx_power', 'tx_power', 'olt_rx_power'];
+
+    private const MAC_COLUMNS = ['mac_address', 'mac_count', 'mac_source'];
 
     public function __construct(private readonly VendorDriverManager $drivers) {}
 
@@ -75,12 +82,17 @@ class OltSyncService
                 'ports' => count($ports),
                 'onus' => count($onus),
                 'online' => collect($onus)->where('status', OnuStatus::Online)->count(),
+                'with_power' => collect($onus)->filter(fn (OnuInfo $o) => $o->rxPower !== null)->count(),
+                'with_mac' => collect($onus)->filter(fn (OnuInfo $o) => $o->macAddress !== null)->count(),
             ];
+            if ($driver instanceof AbstractVendorDriver && $driver->notes) {
+                $stats['notes'] = array_slice($driver->notes, 0, 20);
+            }
 
             $status = empty($onus) && empty($ports) ? SyncStatus::Partial : SyncStatus::Success;
             $message = $status === SyncStatus::Partial
                 ? 'Connected, but no ports/ONUs returned (check vendor OID map).'
-                : "Synced {$stats['ports']} ports, {$stats['onus']} ONUs.";
+                : "Synced {$stats['ports']} ports, {$stats['onus']} ONUs ({$stats['with_power']} with optical power, {$stats['with_mac']} with MAC).";
 
             return $this->finish($olt, $log, $status, $message, $stats, $startedAt);
         } catch (Throwable $e) {
@@ -114,8 +126,20 @@ class OltSyncService
                 return $this->finish($olt, $log, SyncStatus::Failed, 'ONU not found on OLT.', [], $startedAt, refreshOlt: false);
             }
 
-            $existing = ['index' => $onu->onu_index, 'status' => $onu->status, 'online_since' => $onu->online_since];
-            $onu->fill($this->onuRow($info, $onu->olt_port_id, $existing));
+            $existing = $this->previousState($onu);
+            $row = $this->onuRow($info, $onu->olt_port_id, $existing);
+
+            // Same preservation rule as the bulk path: don't wipe CLI-sourced values.
+            if ($olt->cli_enabled) {
+                if ($info->rxPower === null && $info->txPower === null && $info->oltRxPower === null) {
+                    unset($row['rx_power'], $row['tx_power'], $row['olt_rx_power']);
+                }
+                if ($info->macAddress === null) {
+                    unset($row['mac_address'], $row['mac_count'], $row['mac_source']);
+                }
+            }
+
+            $onu->fill($row);
             $onu->save();
 
             return $this->finish($olt, $log, SyncStatus::Success, 'ONU refreshed.', ['onu' => 1], $startedAt, refreshOlt: false);
@@ -154,9 +178,10 @@ class OltSyncService
             return;
         }
 
-        // Load existing state once to preserve "live since" across syncs.
+        // Load existing state once to preserve "live since" and last-known
+        // identifiers (MAC/serial) across syncs.
         $existing = $olt->onus()
-            ->get(['id', 'onu_index', 'status', 'online_since'])
+            ->get(['id', 'onu_index', 'status', 'online_since', 'last_seen_at', 'mac_address', 'mac_count', 'mac_source', 'onu_mac', 'serial_number', 'model'])
             ->keyBy('onu_index');
 
         $rows = [];
@@ -166,22 +191,34 @@ class OltSyncService
 
             $rows[] = array_merge(
                 ['olt_id' => $olt->id, 'onu_index' => $info->onuIndex],
-                $this->onuRow($info, $portId, $prev ? [
-                    'status' => $prev->status,
-                    'online_since' => $prev->online_since,
-                ] : null),
+                $this->onuRow($info, $portId, $prev ? $this->previousState($prev) : null),
                 ['created_at' => now(), 'updated_at' => now()],
             );
         }
 
         $uniqueBy = ['olt_id', 'onu_index'];
         $updateColumns = [
-            'olt_port_id', 'serial_number', 'mac_address', 'name', 'description', 'status',
-            'rx_power', 'tx_power', 'distance', 'online_since', 'last_seen_at',
+            'olt_port_id', 'serial_number', 'mac_address', 'onu_mac', 'mac_count', 'mac_source',
+            'name', 'description', 'model', 'status',
+            'rx_power', 'tx_power', 'olt_rx_power', 'distance',
+            'online_since', 'last_down_at', 'last_down_cause', 'last_seen_at',
             'last_synced_at', 'updated_at',
         ];
 
-        foreach (array_chunk($rows, $this->onuUpsertBatchSize()) as $chunk) {
+        // If this OLT is CLI-enriched and SNMP gave us no optical / MAC data at
+        // all, keep whatever the CLI job wrote instead of nulling it.
+        if ($olt->cli_enabled) {
+            $anyPower = collect($onus)->contains(fn (OnuInfo $o) => $o->rxPower !== null || $o->txPower !== null || $o->oltRxPower !== null);
+            $anyMac = collect($onus)->contains(fn (OnuInfo $o) => $o->macAddress !== null);
+            if (! $anyPower) {
+                $updateColumns = array_values(array_diff($updateColumns, self::OPTICAL_COLUMNS));
+            }
+            if (! $anyMac) {
+                $updateColumns = array_values(array_diff($updateColumns, self::MAC_COLUMNS));
+            }
+        }
+
+        foreach (array_chunk($rows, $this->onuUpsertBatchSize(count($rows[0]))) as $chunk) {
             Onu::upsert($chunk, $uniqueBy, $updateColumns);
         }
 
@@ -192,11 +229,29 @@ class OltSyncService
         $olt->onus()->whereNotIn('onu_index', $seen)->delete();
     }
 
+    /** @return array<string, mixed> */
+    private function previousState(Onu $onu): array
+    {
+        return [
+            'status' => $onu->status,
+            'online_since' => $onu->online_since,
+            'last_seen_at' => $onu->last_seen_at,
+            'mac_address' => $onu->mac_address,
+            'mac_count' => $onu->mac_count,
+            'mac_source' => $onu->mac_source,
+            'onu_mac' => $onu->onu_mac,
+            'serial_number' => $onu->serial_number,
+            'model' => $onu->model,
+        ];
+    }
+
     /**
      * Build a persistable ONU attribute row, preserving online_since when the
-     * ONU was already online (so "live since" is a stable timestamp).
+     * ONU was already online (so "live since" is a stable timestamp) and the
+     * last-known MAC / serial when the OLT no longer reports one (an offline
+     * ONU disappears from the FDB, but customers still need to be looked up).
      *
-     * @param  array{status?:mixed, online_since?:mixed}|null  $prev
+     * @param  array<string, mixed>|null  $prev
      */
     private function onuRow(OnuInfo $info, ?int $portId, ?array $prev): array
     {
@@ -217,18 +272,29 @@ class OltSyncService
             }
         }
 
+        $mac = $info->macAddress ?? ($prev['mac_address'] ?? null);
+        $macSource = $info->macAddress ? $info->macSource : ($prev['mac_source'] ?? null);
+        $macCount = $info->macAddress ? $info->macCount : ($prev['mac_count'] ?? null);
+
         return [
             'olt_port_id' => $portId,
-            'serial_number' => $info->serialNumber,
-            'mac_address' => $info->macAddress,
+            'serial_number' => $info->serialNumber ?? ($prev['serial_number'] ?? null),
+            'mac_address' => $mac,
+            'onu_mac' => $info->onuMac ?? ($prev['onu_mac'] ?? null),
+            'mac_count' => $macCount,
+            'mac_source' => $mac ? $macSource : null,
             'name' => $info->name,
             'description' => $info->description,
+            'model' => $info->model ?? ($prev['model'] ?? null),
             'status' => $info->status->value,
             'rx_power' => $info->rxPower,
             'tx_power' => $info->txPower,
+            'olt_rx_power' => $info->oltRxPower,
             'distance' => $info->distance,
             'online_since' => $onlineSince,
-            'last_seen_at' => $isOnline ? $now : ($prev['online_since'] ?? null),
+            'last_down_at' => $info->lastDownAt,
+            'last_down_cause' => $info->lastDownCause,
+            'last_seen_at' => $isOnline ? $now : ($prev['last_seen_at'] ?? null),
             'last_synced_at' => $now,
         ];
     }
@@ -299,13 +365,13 @@ class OltSyncService
         return $log;
     }
 
-    private function onuUpsertBatchSize(): int
+    private function onuUpsertBatchSize(int $columns): int
     {
         $max = DB::connection()->getDriverName() === 'sqlite'
             ? self::SQLITE_MAX_PLACEHOLDERS
             : self::MYSQL_MAX_PLACEHOLDERS;
 
-        return max(1, intdiv($max, self::ONU_UPSERT_COLUMNS) - 1);
+        return max(1, intdiv($max, max(1, $columns)) - 1);
     }
 
     /**

@@ -10,8 +10,11 @@ class Onu extends Model
 {
     protected $fillable = [
         'olt_id', 'olt_port_id', 'onu_index', 'serial_number', 'mac_address',
-        'name', 'description', 'status', 'rx_power', 'tx_power', 'distance',
-        'online_since', 'last_seen_at', 'last_synced_at',
+        'onu_mac', 'mac_count', 'mac_source',
+        'name', 'description', 'model', 'status',
+        'rx_power', 'tx_power', 'olt_rx_power', 'distance',
+        'online_since', 'last_down_at', 'last_down_cause',
+        'last_seen_at', 'last_synced_at', 'cli_synced_at',
     ];
 
     protected function casts(): array
@@ -20,10 +23,14 @@ class Onu extends Model
             'status' => OnuStatus::class,
             'rx_power' => 'decimal:2',
             'tx_power' => 'decimal:2',
+            'olt_rx_power' => 'decimal:2',
             'distance' => 'decimal:2',
+            'mac_count' => 'integer',
             'online_since' => 'datetime',
+            'last_down_at' => 'datetime',
             'last_seen_at' => 'datetime',
             'last_synced_at' => 'datetime',
+            'cli_synced_at' => 'datetime',
         ];
     }
 
@@ -62,12 +69,20 @@ class Onu extends Model
         }
 
         $term = trim($term);
+        // Let people paste MACs in any notation (aabb.ccdd.eeff, aa-bb-…, aabbccddeeff).
+        $hex = preg_replace('/[^0-9A-Fa-f]/', '', $term);
+        $macTerm = strlen($hex) === 12 ? strtoupper(implode(':', str_split($hex, 2))) : null;
 
-        return $query->where(function ($q) use ($term) {
+        return $query->where(function ($q) use ($term, $macTerm) {
             $q->where('serial_number', 'like', "%{$term}%")
                 ->orWhere('mac_address', 'like', "%{$term}%")
+                ->orWhere('onu_mac', 'like', "%{$term}%")
                 ->orWhere('name', 'like', "%{$term}%")
                 ->orWhere('description', 'like', "%{$term}%");
+
+            if ($macTerm) {
+                $q->orWhere('mac_address', $macTerm)->orWhere('onu_mac', $macTerm);
+            }
         });
     }
 }

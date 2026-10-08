@@ -1,300 +1,499 @@
 """
-OLT SSH/Telnet Collector
-========================
+OLT SSH/Telnet Collector (v2)
+=============================
 
-A tiny web service that logs into an OLT over SSH or Telnet, runs the vendor's
-command-line commands, and returns the result as JSON. Its job is to fetch the
-things SNMP CANNOT give us on old OLTs — mainly:
+A tiny local web service that logs into an OLT over SSH or Telnet, runs a
+list of CLI commands in ONE session and returns the raw text of each command
+as JSON. It is *transport only* — all parsing happens in the Laravel app
+(app/Services/Olt/Cli), so tuning commands or parsers never requires editing
+or restarting this service.
 
-  * user / CPE MAC addresses
-  * ONT optical power (Rx/Tx) on old firmware like Huawei MA5683T V800R018
+Why it exists: some firmwares do not expose everything over SNMP (Huawei
+MA5683T V800R018 has no per-ONT optical table; customer MACs are not in any
+Huawei MIB). The only way to read those is to log in like a human would.
 
-The Laravel app calls this service locally (http://127.0.0.1:8800). Laravel
-sends the OLT address + login + which task to run; this service does the SSH/
-Telnet work and hands back clean JSON. Laravel never has to speak Telnet itself.
+Design notes
+------------
+* Own minimal Telnet client (socket + IAC negotiation) instead of netmiko /
+  telnetlib: old Huawei OLTs are picky about how fast characters arrive, so we
+  can type with a per-character delay, and telnetlib was removed in Python 3.13.
+* SSH through paramiko's interactive shell, with legacy KEX/ciphers enabled
+  (MA5600T-era devices only speak diffie-hellman-group1 / ssh-rsa / CBC).
+* Prompt detection is generic ("...>", "...#", "...]") and can be overridden
+  per request with `options.prompt_regex`.
+* Paging prompts ("---- More ----", "--More--", "Press any key") are answered
+  automatically; Huawei's "{ <cr>|... }:" parameter menus get an ENTER.
+* Every HTTP call is capped by COLLECTOR_JOB_TIMEOUT so Laravel always gets a
+  JSON answer instead of hanging.
 
-SECURITY: run this bound to 127.0.0.1 ONLY (see the README), and protect it with
-the COLLECTOR_API_KEY header so nothing else on the box can use it.
-
-The one part you may edit later is the "PARSERS" section near the bottom, once you have seen real OLT output via
-the /raw endpoint. The README explains exactly how.
+SECURITY: bind to 127.0.0.1 ONLY and protect it with COLLECTOR_API_KEY (the
+Laravel app sends it in the X-Collector-Key header).
 """
+
+from __future__ import annotations
 
 import os
 import re
+import select
+import socket
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 from typing import Optional
 
 from fastapi import FastAPI, Header, HTTPException
-from pydantic import BaseModel
-from netmiko import ConnectHandler
-from netmiko.huawei.huawei import HuaweiTelnet
-from netmiko.ssh_dispatcher import CLASS_MAPPER
+from pydantic import BaseModel, Field
 
-# The shared secret Laravel must send in the "X-Collector-Key" header.
-# It is read from the environment (set in the .env / systemd file). If it is
-# left as the default, the service still runs but is effectively unprotected —
-# always set a real value in production.
+VERSION = "2.0.0"
+
 API_KEY = os.environ.get("COLLECTOR_API_KEY", "change-me")
-SESSION_LOG = os.environ.get("COLLECTOR_SESSION_LOG")  # optional netmiko trace file
-JOB_TIMEOUT = int(os.environ.get("COLLECTOR_JOB_TIMEOUT", "240"))  # wall-clock cap per HTTP call
+JOB_TIMEOUT = int(os.environ.get("COLLECTOR_JOB_TIMEOUT", "1500"))  # wall-clock cap per HTTP call
+SESSION_LOG = os.environ.get("COLLECTOR_SESSION_LOG")  # optional file: full transcript of every session
 
-# Huawei MA5683T prompts end with > or # (sometimes after banner text).
-HUAWEI_PROMPT_RE = re.compile(r"[>#]\s*$")
-# Incomplete "display" command interactive menu (we landed here if a space broke the line).
-HUAWEI_DISPLAY_MENU_RE = re.compile(r"\{\s*<cr>\|", re.IGNORECASE)
-
-app = FastAPI(title="OLT SSH/Telnet Collector", version="1.0")
+app = FastAPI(title="OLT SSH/Telnet Collector", version=VERSION)
 
 
-class HuaweiOltTelnet(HuaweiTelnet):
-    """Huawei MA5600/MA5683T telnet login, without auto screen-length in session prep.
+# ---------------------------------------------------------------------------
+# Request / response shapes
+# ---------------------------------------------------------------------------
+class RunOptions(BaseModel):
+    char_delay: Optional[float] = None       # seconds between characters when typing (telnet default 0.01)
+    command_timeout: Optional[float] = None  # max seconds to wait for a command to finish (default 120)
+    login_timeout: Optional[float] = None    # max seconds for the login phase (default 40)
+    prompt_regex: Optional[str] = None       # regex that matches the END of a prompt line
+    enable_password: Optional[str] = None    # if "enable" asks for a password
 
-    Stock huawei_telnet calls disable_paging() during connect, which fails on
-    many MA5683T builds. generic_telnet does not know Huawei login prompts and
-    only echoes typed text (display + bell + version). This driver fixes both.
-    """
 
-    def session_preparation(self) -> None:
-        # set_base_prompt() can block on noisy banners — keep it short.
+class RunRequest(BaseModel):
+    host: str
+    username: str
+    password: str
+    protocol: str = "ssh"            # "ssh" | "telnet"
+    port: Optional[int] = None       # default 22 / 23
+    vendor: Optional[str] = None     # huawei | bdcom | vsol | ... (picks sensible defaults)
+    prep: list[str] = Field(default_factory=list)      # run after login, output not returned (still logged)
+    commands: list[str] = Field(default_factory=list)  # data commands, output returned per command
+    options: RunOptions = Field(default_factory=RunOptions)
+    # Backwards compatibility with the v1 /raw endpoint.
+    command: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# Prompt / paging patterns
+# ---------------------------------------------------------------------------
+# A prompt is a short last line ending in >, #, or ] (optionally followed by a
+# space). Examples: "MA5683T>", "MA5683T(config)#", "MA5683T(config-if-gpon-0/1)#",
+# "Switch_config#", "OLT(config)#", "<HUAWEI>", "[HUAWEI]".
+DEFAULT_PROMPT_RE = re.compile(r"^[^\r\n]{0,80}?[>#\]]\s?$", re.MULTILINE)
+
+MORE_RE = re.compile(
+    r"-{2,}\s*More\s*(?:\(\s*Press\s+'?Q'?\s+to\s+break\s*\))?\s*-{2,}"   # Huawei "---- More ( Press 'Q' to break ) ----"
+    r"|--\s*More\s*--"                                                   # Cisco-like "--More--"
+    r"|Press any key to continue"
+    r"|\(Q to quit\)",
+    re.IGNORECASE,
+)
+# Huawei parameter menu: "{ <cr>|backplane<K>|frameid/slotid<S><Length 1-15> }:"
+HUAWEI_MENU_RE = re.compile(r"\{\s*<cr>[^}]*\}\s*:\s*$", re.MULTILINE)
+# Yes/no confirmations we are happy to answer "y" to (only for display-style questions).
+CONFIRM_RE = re.compile(r"\(y/n\)\s*\[?[yn]?\]?\s*:?\s*$|Are you sure[^\n]*\?\s*$", re.IGNORECASE | re.MULTILINE)
+
+LOGIN_USER_RE = re.compile(r"(?:user\s*name|username|login)\s*:\s*$", re.IGNORECASE | re.MULTILINE)
+LOGIN_PASS_RE = re.compile(r"password\s*:\s*$", re.IGNORECASE | re.MULTILINE)
+LOGIN_FAIL_RE = re.compile(
+    r"Reenter times|Username or password invalid|Login incorrect|Authentication failed|Access denied|invalid user|Bad password",
+    re.IGNORECASE,
+)
+
+ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b[=>]")
+
+
+def _clean(text: str) -> str:
+    """Strip ANSI escapes, NULs, bells, carriage returns and backspace echoes."""
+    text = ANSI_RE.sub("", text)
+    text = text.replace("\x00", "").replace("\x07", "")
+    # Backspace handling: "abc\x08\x08\x08   \x08\x08\x08" → cursor games used when a More prompt is erased.
+    while "\x08" in text:
+        text = re.sub(r"[^\x08]\x08", "", text, count=1) if re.search(r"[^\x08]\x08", text) else text.replace("\x08", "")
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+# ---------------------------------------------------------------------------
+# Transports
+# ---------------------------------------------------------------------------
+class TelnetTransport:
+    """Minimal Telnet client: handles IAC option negotiation (refusing
+    everything except ECHO/SGA from the server) and exposes read/write."""
+
+    IAC, DONT, DO, WONT, WILL, SB, SE = 255, 254, 253, 252, 251, 250, 240
+    ECHO, SGA, TTYPE, NAWS = 1, 3, 24, 31
+
+    def __init__(self, host: str, port: int, timeout: float = 30.0):
+        self.sock = socket.create_connection((host, port), timeout=timeout)
+        self.sock.setblocking(False)
+        self._iac_buf = b""
+
+    def read(self, timeout: float) -> str:
+        r, _, _ = select.select([self.sock], [], [], timeout)
+        if not r:
+            return ""
         try:
-            self.set_base_prompt(pattern=r"[>#]")
-        except Exception:
-            self.base_prompt = ">"
-            self.prompt = r"\>"
+            data = self.sock.recv(65535)
+        except (BlockingIOError, InterruptedError):
+            return ""
+        if not data:
+            raise ConnectionError("Telnet connection closed by the OLT")
+        return self._negotiate(self._iac_buf + data)
 
-
-# Register once so ConnectHandler(device_type="huawei_olt_telnet", ...) works.
-CLASS_MAPPER["huawei_olt_telnet"] = HuaweiOltTelnet
-
-
-def _is_huawei_telnet(device_type: str) -> bool:
-    return device_type in ("huawei_olt_telnet", "huawei_telnet")
-
-
-def _huawei_telnet_line(command: str, style: str = "space") -> str:
-    """Build a command line for MA5683T telnet.
-
-    style="space" (default): the normal way — words separated by spaces, then
-        ENTER. Correct for multi-word commands like
-        'display ont optical-info 0/1 0 all'.
-    style="tab": send TAB between words instead of space. Only needed on odd
-        firmware where a space triggers early tab-completion; can itself pop up
-        completion menus on multi-word commands, so it is NOT the default.
-    """
-    command = command.strip()
-    if style == "tab":
-        parts = command.split()
-        if len(parts) <= 1:
-            return (parts[0] if parts else "") + "\r"
-        return parts[0] + "".join("\t" + p for p in parts[1:]) + "\r"
-    return command + "\r"
-
-
-def _strip_async_alarms(text: str) -> str:
-    """Remove Huawei async alarm/event blocks the OLT prints into the session.
-
-    These start with a line like '! FAULT MINOR ...' followed by indented
-    continuation lines (ALARM NAME / PARAMETERS / ...). They corrupt command
-    output, so we drop the whole block. (We also try to suppress them at the
-    source with 'undo alarm output all' during session prep.)
-    """
-    cleaned = []
-    in_alarm = False
-    for line in text.splitlines():
-        if re.match(r"^\s*!\s*(FAULT|RESUME|ALARM|EVENT|NOTIFICATION)", line, re.IGNORECASE):
-            in_alarm = True
-            continue
-        if in_alarm:
-            # Continuation lines are blank or indented; a non-indented line ends it.
-            if line.strip() == "" or line[:1].isspace():
+    def _negotiate(self, data: bytes) -> str:
+        out = bytearray()
+        i = 0
+        self._iac_buf = b""
+        while i < len(data):
+            b = data[i]
+            if b != self.IAC:
+                out.append(b)
+                i += 1
                 continue
-            in_alarm = False
-        cleaned.append(line)
-    return "\n".join(cleaned)
-
-
-def _drain_channel(conn, seconds: float = 1.5) -> str:
-    """Read any login banners / async alarms before the first command."""
-    return _read_channel_until_prompt(conn, read_timeout=seconds, idle_seconds=0.4)
-
-
-def _abort_to_idle(conn, read_timeout: float = 5) -> None:
-    """Ctrl+C out of partial commands / interactive menus back to MA5683T>."""
-    for _ in range(3):
-        conn.write_channel("\x03")
-        time.sleep(0.12)
-    _read_channel_until_prompt(conn, read_timeout=read_timeout, idle_seconds=0.4)
-
-
-def _read_channel_until_prompt(conn, read_timeout: float, idle_seconds: float = 2.0) -> str:
-    """Read telnet output until Huawei prompt or timeout (no regex prompt matching)."""
-    output = ""
-    deadline = time.monotonic() + read_timeout
-    idle_deadline = None
-
-    while time.monotonic() < deadline:
-        chunk = conn.read_channel()
-        if chunk:
-            output += chunk
-            idle_deadline = None
-            if "---- More" in chunk or "----More" in chunk:
-                conn.write_channel(" ")
+            if i + 1 >= len(data):
+                self._iac_buf = data[i:]
+                break
+            cmd = data[i + 1]
+            if cmd == self.IAC:
+                out.append(self.IAC)
+                i += 2
                 continue
-            tail = output.splitlines()[-1] if output.splitlines() else ""
-            if HUAWEI_PROMPT_RE.search(tail):
-                break
-            if HUAWEI_DISPLAY_MENU_RE.search(tail):
-                break
-        else:
-            if idle_deadline is None:
-                idle_deadline = time.monotonic() + idle_seconds
-            elif time.monotonic() >= idle_deadline:
-                break
-            time.sleep(0.15)
+            if cmd in (self.DO, self.DONT, self.WILL, self.WONT):
+                if i + 2 >= len(data):
+                    self._iac_buf = data[i:]
+                    break
+                opt = data[i + 2]
+                if cmd == self.DO:
+                    # We refuse to do anything (no TTYPE/NAWS) — plain dumb terminal.
+                    self._send_raw(bytes([self.IAC, self.WONT, opt]))
+                elif cmd == self.WILL:
+                    reply = self.DO if opt in (self.ECHO, self.SGA) else self.DONT
+                    self._send_raw(bytes([self.IAC, reply, opt]))
+                i += 3
+                continue
+            if cmd == self.SB:
+                end = data.find(bytes([self.IAC, self.SE]), i)
+                if end == -1:
+                    self._iac_buf = data[i:]
+                    break
+                i = end + 2
+                continue
+            i += 2  # other 2-byte commands (NOP, GA, ...)
+        return out.decode("latin-1")
 
-    return output
-
-
-def _send_channel(conn, command: str, read_timeout: float = 60) -> str:
-    """Low-level send for Huawei telnet — avoids send_command prompt hangs."""
-    _abort_to_idle(conn)
-    conn.write_channel(_huawei_telnet_line(command))
-    output = _read_channel_until_prompt(conn, read_timeout=read_timeout)
-
-    # Still in the 'display' submenu or only saw async alarms — retry once.
-    if HUAWEI_DISPLAY_MENU_RE.search(output) or (
-        "version" in command.lower() and "VERSION" not in output.upper() and "VRP" not in output
-    ):
-        _abort_to_idle(conn)
-        conn.write_channel(_huawei_telnet_line(command))
-        output = _read_channel_until_prompt(conn, read_timeout=read_timeout)
-
-    return output
-
-
-# ---------------------------------------------------------------------------
-# Request shape: what Laravel sends us for every call.
-# ---------------------------------------------------------------------------
-class OltRequest(BaseModel):
-    host: str                       # OLT IP, e.g. "172.16.29.5"
-    username: str                   # OLT login user
-    password: str                   # OLT login password
-    protocol: str = "ssh"           # "ssh" or "telnet"
-    port: Optional[int] = None      # defaults: 22 for ssh, 23 for telnet
-    device_type: Optional[str] = None  # advanced: override netmiko driver
-    command: Optional[str] = None   # only used by /raw
-
-    # Some OLTs (Huawei) need a port + ONT id to target one ONU; optional.
-    frame_slot_port: Optional[str] = None  # e.g. "0/1/0"
-    ont_id: Optional[int] = None
-
-
-# ---------------------------------------------------------------------------
-# Connection helpers
-# ---------------------------------------------------------------------------
-def _device_type(req: OltRequest) -> str:
-    """Pick the netmiko 'driver' for this OLT.
-
-    Recommended values:
-      Huawei OLT over SSH    -> "huawei_smartax"
-      Huawei OLT over Telnet -> "huawei_olt_telnet" (default)
-      Legacy / debug         -> "huawei_telnet", "generic_telnet"
-    """
-    if req.device_type:
-        return req.device_type
-    if req.protocol == "telnet":
-        return "huawei_olt_telnet"
-    return "huawei_smartax"
-
-
-def _connect(req: OltRequest):
-    device_type = _device_type(req)
-    kwargs = dict(
-        device_type=device_type,
-        host=req.host,
-        username=req.username,
-        password=req.password,
-        port=req.port or (23 if req.protocol == "telnet" else 22),
-        fast_cli=False,
-        conn_timeout=30,
-        auth_timeout=30,
-        read_timeout_override=60,
-        global_cmd_verify=False,
-    )
-    if SESSION_LOG:
-        kwargs["session_log"] = SESSION_LOG
-        kwargs["session_log_record"] = True
-    return ConnectHandler(**kwargs)
-
-
-def _prep_session(conn, device_type: str, protocol: str) -> None:
-    """Disable paging after login. Failures are ignored (model/firmware vary)."""
-    if _is_huawei_telnet(device_type):
-        _drain_channel(conn, seconds=2)
-        # MA5683T V800R018: prefer scroll; screen-length often missing or interactive.
-        prep_commands = ("scroll 512", "screen-length 0 temporary", "screen-length 0")
-    else:
-        prep_commands = ("screen-length 0 temporary", "screen-length 0", "scroll 512")
-
-    for prep in prep_commands:
+    def _send_raw(self, b: bytes) -> None:
         try:
-            if _is_huawei_telnet(device_type):
-                _send_channel(conn, prep, read_timeout=8)
-            else:
-                conn.send_command(prep, read_timeout=10, cmd_verify=False)
-        except Exception:
+            self.sock.sendall(b)
+        except OSError:
+            pass
+
+    def write(self, text: str, char_delay: float = 0.0) -> None:
+        data = text.encode("latin-1", errors="replace").replace(b"\xff", b"\xff\xff")
+        if char_delay <= 0:
+            self.sock.sendall(data)
+            return
+        for ch in data:
+            self.sock.sendall(bytes([ch]))
+            time.sleep(char_delay)
+
+    def close(self) -> None:
+        try:
+            self.sock.close()
+        except OSError:
             pass
 
 
-def _command_timeout(command: str) -> float:
-    """Per-command read budget (seconds)."""
-    if "mac-address all" in command:
-        return 180.0
-    if "optical-info" in command and " all" in command:
-        return 120.0
-    return 45.0
+class SshTransport:
+    """paramiko interactive shell with legacy algorithms enabled."""
 
+    def __init__(self, host: str, port: int, username: str, password: str, timeout: float = 30.0):
+        import paramiko  # imported lazily so the telnet-only path has no hard dependency at import time
 
-def _send(conn, device_type: str, command: str) -> str:
-    read_timeout = _command_timeout(command)
-    if _is_huawei_telnet(device_type):
-        return _send_channel(conn, command, read_timeout=read_timeout)
-    return conn.send_command(command, read_timeout=int(read_timeout), cmd_verify=False)
+        sock = socket.create_connection((host, port), timeout=timeout)
+        self.transport = paramiko.Transport(sock)
+        self.transport.banner_timeout = timeout
+        self.transport.handshake_timeout = timeout
+        opts = self.transport.get_security_options()
+        try:
+            opts.kex = tuple(
+                list(opts.kex)
+                + [k for k in ("diffie-hellman-group1-sha1", "diffie-hellman-group14-sha1", "diffie-hellman-group-exchange-sha1") if k not in opts.kex]
+            )
+            opts.ciphers = tuple(
+                list(opts.ciphers)
+                + [c for c in ("aes128-cbc", "aes256-cbc", "3des-cbc", "aes192-cbc") if c not in opts.ciphers]
+            )
+            opts.key_types = tuple(list(opts.key_types) + [k for k in ("ssh-rsa", "ssh-dss") if k not in opts.key_types])
+        except ValueError:
+            pass  # algorithm unknown to this paramiko build — fine
+        self.transport.start_client(timeout=timeout)
+        try:
+            self.transport.auth_password(username, password)
+        except paramiko.BadAuthenticationType:
+            # Some OLTs only offer keyboard-interactive.
+            self.transport.auth_interactive(username, lambda title, instr, prompts: [password for _ in prompts])
+        self.chan = self.transport.open_session()
+        self.chan.get_pty(term="vt100", width=512, height=1000)
+        self.chan.invoke_shell()
+        self.chan.settimeout(0.0)
 
+    def read(self, timeout: float) -> str:
+        r, _, _ = select.select([self.chan], [], [], timeout)
+        if not r:
+            return ""
+        if self.chan.recv_ready():
+            data = self.chan.recv(65535)
+            if not data:
+                raise ConnectionError("SSH channel closed by the OLT")
+            return data.decode("latin-1")
+        if self.chan.closed or self.chan.eof_received:
+            raise ConnectionError("SSH channel closed by the OLT")
+        return ""
 
-def _run_commands_body(req: OltRequest, commands: list[str]) -> str:
-    """Open one session, run several commands, return all output joined."""
-    out = []
-    device_type = _device_type(req)
-    protocol = "telnet" if req.protocol == "telnet" else "ssh"
-    with _connect(req) as conn:
-        if protocol != "telnet":
+    def write(self, text: str, char_delay: float = 0.0) -> None:
+        data = text.encode("latin-1", errors="replace")
+        if char_delay <= 0:
+            self.chan.sendall(data)
+            return
+        for ch in data:
+            self.chan.sendall(bytes([ch]))
+            time.sleep(char_delay)
+
+    def close(self) -> None:
+        try:
+            self.chan.close()
+        finally:
             try:
-                conn.enable()
+                self.transport.close()
             except Exception:
                 pass
-        _prep_session(conn, device_type, protocol)
-        for cmd in commands:
-            out.append(f"### {cmd}\n" + _send(conn, device_type, cmd))
-    return "\n".join(out)
 
 
-def _run_commands(req: OltRequest, commands: list[str]) -> str:
-    """Wall-clock cap so Laravel always gets a JSON error instead of hanging."""
+# ---------------------------------------------------------------------------
+# Session driver (vendor-agnostic)
+# ---------------------------------------------------------------------------
+class Session:
+    def __init__(self, req: RunRequest):
+        self.req = req
+        self.protocol = "telnet" if req.protocol == "telnet" else "ssh"
+        self.port = req.port or (23 if self.protocol == "telnet" else 22)
+        vendor = (req.vendor or "").lower()
+        o = req.options
+        self.char_delay = o.char_delay if o.char_delay is not None else (0.01 if self.protocol == "telnet" else 0.0)
+        self.command_timeout = o.command_timeout or 120.0
+        self.login_timeout = o.login_timeout or 40.0
+        self.prompt_re = re.compile(o.prompt_regex, re.MULTILINE) if o.prompt_regex else DEFAULT_PROMPT_RE
+        self.huawei = vendor == "huawei"
+        self.log: list[str] = []
+        self.prompt: str = ""
+        self.transport = None
+
+    # -- low level ----------------------------------------------------------
+    def _log(self, text: str) -> None:
+        if text:
+            self.log.append(text)
+            if SESSION_LOG:
+                try:
+                    with open(SESSION_LOG, "a", encoding="utf-8", errors="replace") as fh:
+                        fh.write(text)
+                except OSError:
+                    pass
+
+    def _write(self, text: str) -> None:
+        self._log(f"\n>>> {text!r}\n")
+        self.transport.write(text, self.char_delay)
+
+    def _is_prompt_line(self, line: str) -> bool:
+        line = line.rstrip()
+        if not line or len(line) > 90:
+            return False
+        return bool(self.prompt_re.search(line))
+
+    def _read_until_prompt(self, timeout: float, idle: float = 1.0, answer_pages: bool = True) -> str:
+        """Read until the last line looks like a prompt, or `idle` seconds pass
+        with no data after at least one byte, or `timeout` is exceeded."""
+        buf = ""
+        deadline = time.monotonic() + timeout
+        last_data = time.monotonic()
+        while time.monotonic() < deadline:
+            chunk = self.transport.read(0.2)
+            if chunk:
+                self._log(chunk)
+                buf += chunk
+                last_data = time.monotonic()
+                clean = _clean(buf)
+                tail = clean.rstrip("\n ").split("\n")[-1] if clean.strip() else ""
+                if answer_pages and MORE_RE.search(tail):
+                    self.transport.write(" ", 0.0)
+                    buf = MORE_RE.sub("", buf) if len(buf) < 200_000 else buf
+                    continue
+                if self.huawei and HUAWEI_MENU_RE.search(clean[-300:]):
+                    self.transport.write("\r", 0.0)
+                    continue
+                if answer_pages and CONFIRM_RE.search(clean[-200:]):
+                    self.transport.write("y\r", 0.0)
+                    continue
+                if self._is_prompt_line(tail):
+                    # Short grace period: a prompt-looking line might still be output in flight.
+                    extra = self.transport.read(0.15)
+                    if extra:
+                        buf += extra
+                        self._log(extra)
+                        continue
+                    return _clean(buf)
+            else:
+                if buf and time.monotonic() - last_data > idle:
+                    return _clean(buf)
+        return _clean(buf)
+
+    # -- login -----------------------------------------------------------------
+    def connect(self) -> None:
+        if self.protocol == "telnet":
+            self.transport = TelnetTransport(self.req.host, self.port, timeout=min(30.0, self.login_timeout))
+            self._telnet_login()
+        else:
+            self.transport = SshTransport(self.req.host, self.port, self.req.username, self.req.password, timeout=min(30.0, self.login_timeout))
+            text = self._read_until_prompt(self.login_timeout, idle=1.5)
+            if LOGIN_PASS_RE.search(text):  # some OLTs ask again inside the shell
+                self._write(self.req.password + "\r")
+                text = self._read_until_prompt(self.login_timeout, idle=1.5)
+            self._capture_prompt(text)
+        if not self.prompt:
+            # Nudge with ENTER and try once more.
+            self._write("\r")
+            self._capture_prompt(self._read_until_prompt(10, idle=1.0))
+        if not self.prompt:
+            raise RuntimeError("Logged in but could not detect the CLI prompt. Transcript tail: " + repr(_clean("".join(self.log))[-400:]))
+
+    def _telnet_login(self) -> None:
+        deadline = time.monotonic() + self.login_timeout
+        sent_user = sent_pass = False
+        buf = ""
+        while time.monotonic() < deadline:
+            chunk = self.transport.read(0.3)
+            if chunk:
+                self._log(chunk)
+                buf += chunk
+            clean = _clean(buf)
+            if LOGIN_FAIL_RE.search(clean):
+                raise RuntimeError("OLT rejected the login (bad username/password?). Transcript tail: " + repr(clean[-300:]))
+            tail = clean.rstrip(" ").split("\n")[-1] if clean else ""
+            if not sent_user and LOGIN_USER_RE.search(tail):
+                self._write(self.req.username + "\r")
+                sent_user = True
+                buf = ""
+                continue
+            if not sent_pass and LOGIN_PASS_RE.search(tail):
+                self._write(self.req.password + "\r")
+                sent_pass = True
+                buf = ""
+                continue
+            if sent_pass and self._is_prompt_line(tail):
+                self._capture_prompt(clean)
+                return
+            if not chunk and not sent_user and time.monotonic() - deadline > -self.login_timeout + 3 and not buf:
+                # Nothing arrived yet: some devices wait for us first.
+                self._write("\r")
+        raise RuntimeError("Telnet login timed out (no prompt). Transcript tail: " + repr(_clean(buf)[-300:]))
+
+    def _capture_prompt(self, text: str) -> None:
+        lines = [l for l in text.rstrip("\n ").split("\n") if l.strip()]
+        if lines and self._is_prompt_line(lines[-1]):
+            self.prompt = lines[-1].strip()
+
+    # -- commands ----------------------------------------------------------------
+    def run(self, command: str, timeout: Optional[float] = None) -> tuple[str, Optional[str]]:
+        """Send one command and return (output_without_echo_and_prompt, error)."""
+        timeout = timeout or self.command_timeout
+        self._write(command + "\r")
+        raw = self._read_until_prompt(timeout, idle=max(2.0, min(8.0, timeout / 10)))
+
+        lines = raw.split("\n")
+        # Drop the echoed command (first non-empty line that contains it).
+        for i, line in enumerate(lines[:3]):
+            if command.strip() and command.strip() in line:
+                lines = lines[i + 1:]
+                break
+        # Drop the trailing prompt.
+        while lines and not lines[-1].strip():
+            lines.pop()
+        if lines and self._is_prompt_line(lines[-1]):
+            self.prompt = lines[-1].strip()
+            lines.pop()
+        output = "\n".join(lines).strip("\n")
+
+        error = None
+        if re.search(r"^\s*(%|Error:|\^\s*$)", output, re.MULTILINE) and re.search(
+            r"Unknown command|Incomplete command|Wrong parameter|Unrecognized|Invalid input|Parameter error|Too many parameters|Failure", output, re.IGNORECASE
+        ):
+            error = next((l.strip() for l in lines if re.search(r"Unknown|Incomplete|Wrong|Unrecognized|Invalid|error|Failure", l, re.IGNORECASE)), "command rejected")
+        elif not output and timeout and len(raw) == 0:
+            error = f"no output within {timeout:.0f}s"
+        return output, error
+
+    def close(self) -> None:
+        if self.transport:
+            try:
+                self._write("quit\r") if False else None  # (never auto-quit: some OLTs ask y/n and hang)
+            finally:
+                self.transport.close()
+
+
+# ---------------------------------------------------------------------------
+# Job runner with wall-clock cap
+# ---------------------------------------------------------------------------
+def _execute(req: RunRequest) -> dict:
+    started = time.monotonic()
+    session = Session(req)
+    outputs = []
+    try:
+        session.connect()
+        login_log = _clean("".join(session.log))[-6000:]
+
+        for cmd in req.prep:
+            session.log.clear()
+            out, err = session.run(cmd, timeout=min(30.0, session.command_timeout))
+            login_log += f"\n### prep: {cmd}\n{out}" + (f"\nERROR: {err}" if err else "")
+            if session.req.options.enable_password and re.search(r"password", out, re.IGNORECASE):
+                session._write(session.req.options.enable_password + "\r")
+                session._read_until_prompt(10)
+
+        for cmd in req.commands:
+            t0 = time.monotonic()
+            session.log.clear()
+            try:
+                out, err = session.run(cmd)
+            except ConnectionError as exc:
+                outputs.append({"command": cmd, "output": "", "error": f"connection lost: {exc}", "duration_ms": int((time.monotonic() - t0) * 1000)})
+                break
+            outputs.append({"command": cmd, "output": out, "error": err, "duration_ms": int((time.monotonic() - t0) * 1000)})
+    finally:
+        session.close()
+
+    return {
+        "outputs": outputs,
+        "prompt": session.prompt,
+        "login_log": login_log if "login_log" in locals() else _clean("".join(session.log))[-6000:],
+        "duration_ms": int((time.monotonic() - started) * 1000),
+        "protocol": session.protocol,
+        "version": VERSION,
+    }
+
+
+def _run_capped(req: RunRequest) -> dict:
     with ThreadPoolExecutor(max_workers=1) as pool:
-        future = pool.submit(_run_commands_body, req, commands)
+        future = pool.submit(_execute, req)
         try:
             return future.result(timeout=JOB_TIMEOUT)
         except FuturesTimeout as exc:
-            raise HTTPException(
-                status_code=504,
-                detail=f"OLT session timed out after {JOB_TIMEOUT}s (login or command still running)",
-            ) from exc
+            raise HTTPException(status_code=504, detail=f"OLT session exceeded {JOB_TIMEOUT}s (COLLECTOR_JOB_TIMEOUT)") from exc
 
 
-def _auth(key: Optional[str]):
+def _auth(key: Optional[str]) -> None:
     if key != API_KEY:
         raise HTTPException(status_code=401, detail="Bad or missing collector API key")
 
@@ -304,141 +503,40 @@ def _auth(key: Optional[str]):
 # ---------------------------------------------------------------------------
 @app.get("/health")
 def health():
-    """Quick check that the service is up. No login is performed."""
-    return {"status": "ok"}
+    return {"status": "ok", "version": VERSION, "job_timeout": JOB_TIMEOUT}
+
+
+@app.post("/run")
+def run(req: RunRequest, x_collector_key: Optional[str] = Header(None)):
+    """Run `prep` then `commands` in one login session; return each command's raw output."""
+    _auth(x_collector_key)
+    if not req.commands and req.command:
+        req.commands = [req.command]
+    if not req.commands:
+        raise HTTPException(status_code=400, detail="`commands` is required")
+    if len(req.commands) > 400:
+        raise HTTPException(status_code=400, detail="too many commands (max 400)")
+    try:
+        return _run_capped(req)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 — surface everything as a JSON error
+        raise HTTPException(status_code=502, detail=f"OLT connection/command failed: {exc}")
 
 
 @app.post("/raw")
-def raw(req: OltRequest, x_collector_key: Optional[str] = Header(None)):
-    """DISCOVERY TOOL. Run ANY command and get the raw text back.
-
-    Use this first: send the real command for your OLT, look at the output, then
-    adjust the parsers below (or send the output to your developer)."""
+def raw(req: RunRequest, x_collector_key: Optional[str] = Header(None)):
+    """v1-compatible: run ONE command, return {"output": ...}."""
     _auth(x_collector_key)
-    if not req.command:
+    cmd = req.command or (req.commands[0] if req.commands else None)
+    if not cmd:
         raise HTTPException(status_code=400, detail="`command` is required for /raw")
+    req.commands = [cmd]
     try:
-        return {"output": _run_commands(req, [req.command])}
+        res = _run_capped(req)
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"OLT connection/command failed: {e}")
-
-
-@app.post("/onu/optical")
-def onu_optical(req: OltRequest, x_collector_key: Optional[str] = Header(None)):
-    """Return parsed ONT optical power (Rx/Tx in dBm)."""
-    _auth(x_collector_key)
-    cmd = _huawei_optical_command(req)
-    try:
-        text = _run_commands(req, [cmd])
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"OLT connection/command failed: {e}")
-    return {"command": cmd, "rows": parse_huawei_optical(text), "raw": text}
-
-
-@app.post("/onu/mac")
-def onu_mac(req: OltRequest, x_collector_key: Optional[str] = Header(None)):
-    """Return parsed CPE/user MAC addresses learned behind the ONUs."""
-    _auth(x_collector_key)
-    cmd = _huawei_mac_command(req)
-    try:
-        text = _run_commands(req, [cmd])
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"OLT connection/command failed: {e}")
-    return {"command": cmd, "rows": parse_huawei_mac(text), "raw": text}
-
-
-# ===========================================================================
-# PARSERS  — the only part you are likely to edit, AFTER seeing real /raw output
-# ===========================================================================
-#
-# Different Huawei firmwares print these tables slightly differently. The regexes
-# below cover the common MA5600/MA5683T format. If your output looks different,
-# run /raw, copy the text, and adjust the patterns (or send it to your developer
-# and they will adjust these for you).
-
-def _huawei_optical_command(req: OltRequest) -> str:
-    # Whole-port dump (all ONTs on a PON port). Needs frame_slot_port like "0/1/0".
-    fsp = req.frame_slot_port or "0/1/0"
-    if req.ont_id is not None:
-        return f"display ont optical-info {fsp} {req.ont_id}"
-    return f"display ont optical-info {fsp} all"
-
-
-def _huawei_mac_command(req: OltRequest) -> str:
-    # Learned MAC table. On MA5600: "display mac-address all" (can be large) or
-    # per ONT: "display mac-address ont-id <fsp> <ont-id>".
-    if req.frame_slot_port and req.ont_id is not None:
-        return f"display mac-address ont-id {req.frame_slot_port} {req.ont_id}"
-    return "display mac-address all"
-
-
-def parse_huawei_optical(text: str) -> list[dict]:
-    """Extract Rx/Tx power. Matches lines/blocks containing both values.
-
-    Typical Huawei block:
-        ONT-ID :  1
-        Rx optical power(dBm) :  -18.55
-        Tx optical power(dBm) :  2.31
-    """
-    rows = []
-    # Strategy: find each ONT-ID, then the nearest Rx/Tx values after it.
-    blocks = re.split(r"ONT[-\s]?ID\s*[:=]\s*(\d+)", text, flags=re.IGNORECASE)
-    # re.split keeps the captured ont-id as separate items: [pre, id, body, id, body, ...]
-    for i in range(1, len(blocks), 2):
-        ont_id = blocks[i]
-        body = blocks[i + 1] if i + 1 < len(blocks) else ""
-        rx = re.search(r"Rx\s*(?:optical\s*)?power.*?(-?\d+\.\d+)", body, re.IGNORECASE)
-        tx = re.search(r"Tx\s*(?:optical\s*)?power.*?(-?\d+\.\d+)", body, re.IGNORECASE)
-        if rx or tx:
-            rows.append({
-                "ont_id": int(ont_id),
-                "rx_power": float(rx.group(1)) if rx else None,
-                "tx_power": float(tx.group(1)) if tx else None,
-            })
-
-    # Fallback: single-line "... -18.55 ... 2.31 ..." table rows.
-    if not rows:
-        for m in re.finditer(
-            r"(-?\d+\.\d+)\s+(-?\d+\.\d+)", text
-        ):
-            a, b = float(m.group(1)), float(m.group(2))
-            # Rx is the negative one, Tx the small positive one.
-            rx_val, tx_val = (a, b) if a < b else (b, a)
-            rows.append({"ont_id": None, "rx_power": rx_val, "tx_power": tx_val})
-    return rows
-
-
-def parse_huawei_mac(text: str) -> list[dict]:
-    """Extract MAC addresses and (when present) the port/ONT they sit behind.
-
-    Matches MACs in Huawei dotted form (00e0-fc12-3456) or colon/hyphen form.
-    """
-    rows = []
-    mac_re = re.compile(
-        r"([0-9A-Fa-f]{4}[-.][0-9A-Fa-f]{4}[-.][0-9A-Fa-f]{4}"      # 00e0-fc12-3456
-        r"|(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2})"                  # 00:e0:fc:12:34:56
-    )
-    for line in text.splitlines():
-        m = mac_re.search(line)
-        if not m:
-            continue
-        # Try to pick up a "0/1/0" frame/slot/port and an ont id on the same line.
-        fsp = re.search(r"\b(\d+/\d+/\d+)\b", line)
-        ont = re.search(r"\bont[-\s]?id?\s*[:=]?\s*(\d+)\b", line, re.IGNORECASE)
-        rows.append({
-            "mac": _normalise_mac(m.group(1)),
-            "frame_slot_port": fsp.group(1) if fsp else None,
-            "ont_id": int(ont.group(1)) if ont else None,
-        })
-    return rows
-
-
-def _normalise_mac(raw: str) -> str:
-    hexonly = re.sub(r"[^0-9A-Fa-f]", "", raw).upper()
-    return ":".join(hexonly[i:i + 2] for i in range(0, 12, 2)) if len(hexonly) == 12 else raw.upper()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"OLT connection/command failed: {exc}")
+    out = res["outputs"][0] if res["outputs"] else {"output": ""}
+    return {"output": out.get("output", ""), "error": out.get("error"), "prompt": res.get("prompt"), "login_log": res.get("login_log")}

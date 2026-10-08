@@ -48,6 +48,12 @@ class Manage extends Component
 
     public string $ssh_password = '';
 
+    public bool $cli_enabled = false;
+
+    public string $cli_protocol = 'ssh';
+
+    public ?int $cli_interval = null;
+
     public string $status = 'active';
 
     public bool $live_fetch = true;
@@ -75,6 +81,9 @@ class Manage extends Component
             $this->snmp_priv_protocol = $olt->snmp_priv_protocol ?: 'AES';
             $this->ssh_username = (string) $olt->ssh_username;
             $this->ssh_port = (int) $olt->ssh_port;
+            $this->cli_enabled = (bool) $olt->cli_enabled;
+            $this->cli_protocol = $olt->cli_protocol ?: 'ssh';
+            $this->cli_interval = $olt->cli_interval;
             $this->status = $olt->status->value;
             $this->live_fetch = (bool) $olt->live_fetch;
             $this->is_simulated = (bool) $olt->is_simulated;
@@ -105,6 +114,8 @@ class Manage extends Component
             'snmp_sec_name' => 'required_if:snmp_version,v3|nullable|string',
             'ssh_username' => 'nullable|string|max:64',
             'ssh_port' => 'nullable|integer|min:1|max:65535',
+            'cli_protocol' => 'required|in:ssh,telnet',
+            'cli_interval' => 'nullable|integer|min:5|max:1440',
             'status' => 'required|in:active,inactive,maintenance',
             'sync_interval' => 'nullable|integer|min:1|max:1440',
         ];
@@ -126,6 +137,9 @@ class Manage extends Component
             'snmp_auth_protocol' => $this->snmp_auth_protocol,
             'snmp_priv_protocol' => $this->snmp_priv_protocol,
             'ssh_username' => $this->ssh_username ?: null,
+            'cli_enabled' => $this->cli_enabled,
+            'cli_protocol' => $this->cli_protocol === 'telnet' ? 'telnet' : 'ssh',
+            'cli_interval' => $this->cli_interval ?: null,
         ]);
 
         // Only overwrite secrets when a new value was entered.

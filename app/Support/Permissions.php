@@ -26,6 +26,7 @@ class Permissions
             'olt.update' => ['Edit OLTs', 'OLT'],
             'olt.delete' => ['Delete OLTs', 'OLT'],
             'olt.sync' => ['Trigger OLT sync', 'OLT'],
+            'olt.diagnose' => ['Run OLT diagnostics (SNMP walks, CLI commands)', 'OLT'],
 
             // ONU
             'onu.view' => ['View ONUs', 'ONU'],
@@ -81,7 +82,7 @@ class Permissions
             'super-admin' => $all, // also bypasses via Gate::before
             'noc-admin' => [
                 'dashboard.view',
-                'olt.view', 'olt.create', 'olt.update', 'olt.sync',
+                'olt.view', 'olt.create', 'olt.update', 'olt.sync', 'olt.diagnose',
                 'onu.view', 'onu.sync',
                 'api.view', 'api.manage',
                 'log.view',

@@ -1,385 +1,200 @@
-# OLT SSH/Telnet Collector — Step-by-Step Setup
+# OLT SSH/Telnet Collector (v2) — Setup Guide
 
-This is a small helper program (written in Python) that logs into an OLT over
-**SSH or Telnet**, runs the OLT's command-line commands, and gives the result
-back to our Laravel app as clean data.
+A small helper service (Python) that logs into an OLT over **SSH or Telnet**,
+runs CLI commands, and hands the raw text back to the Laravel app. The app does
+all the parsing (`app/Services/Olt/Cli`), so you normally never edit Python.
 
-**Why we need it:** some OLTs (for example the **Huawei MA5683T** on old
-firmware) do **not** expose ONT **optical power** or **user/CPE MAC addresses**
-over SNMP. The only way to read them is to log in like a human and type
-commands. This collector does that automatically.
-
-> You do **not** need to know Python. Just copy–paste the commands below in
-> order. Lines starting with `#` are comments/explanations — you don't type
-> those. Everything else you can paste exactly as written, only changing the
-> few values that are clearly marked (like folder paths or the OLT password).
-
----
-
-## How it fits together (the big picture)
+**Why we need it:** some OLT firmwares do not expose ONT **optical power** or
+**customer (router) MAC addresses** over SNMP — e.g. **Huawei MA5683T
+V800R018**. The collector reads them the way a human would: by logging in and
+typing commands.
 
 ```
-  Laravel app  ──HTTP──►  Python collector  ──SSH/Telnet──►  OLT
- (our website)            (this program,                    (Huawei, etc.)
-                          runs on the SAME server)
+  Laravel app  ──HTTP (127.0.0.1:8800)──►  collector.py  ──SSH/Telnet──►  OLT
 ```
 
-1. Laravel asks the collector: "give me the optical power for OLT 10".
-2. The collector logs into that OLT, runs the command, reads the text.
-3. The collector turns the text into tidy JSON and returns it to Laravel.
+* Laravel sends: OLT IP + login + protocol + list of commands.
+* The collector logs in once, runs the commands (handling paging / menus),
+  returns each command's raw output as JSON.
+* Laravel parses the text and merges optical power / MACs into the ONU rows.
 
-The collector listens only on `127.0.0.1` (the server talking to itself), so it
-is **not** reachable from the internet. OLT passwords never leave the server.
-
----
-
-## What you need before starting
-
-- Access to your **production server** (the machine where the Laravel site runs).
-- The server's login (SSH for Linux, or Remote Desktop for Windows).
-- An OLT that the server can reach on the network, plus its **login user and
-  password** and whether it uses **SSH (port 22)** or **Telnet (port 23)**.
-
-Pick your server type and follow that section:
-
-- **Linux server (Ubuntu/Debian)** → start at **Step 1 (Linux)**. *(Most
-  production Laravel servers are Linux.)*
-- **Windows server** → jump to **Step 1 (Windows)** near the bottom.
+The collector listens only on `127.0.0.1`, so it is **not** reachable from
+the internet. OLT passwords are sent per request and never stored.
 
 ---
 
-# LINUX SERVER (Ubuntu / Debian)
+## Linux server (Ubuntu / Debian) — step by step
 
-## Step 1 (Linux) — Open a terminal on the server
+Run these on the production server (the machine where the Laravel site runs).
 
-Log into your server over SSH (from your PC):
+### 1. Install Python
 
 ```bash
-ssh your-user@your-server-ip
-```
-
-If you don't know how, ask your hosting provider for "SSH access". You'll end up
-at a black screen with a prompt — that's the terminal. Type the commands below
-there.
-
-## Step 2 (Linux) — Install Python and helper tools
-
-```bash
-# Update the list of available software
 sudo apt update
-
-# Install Python, its package installer, and the "venv" tool (a clean sandbox)
 sudo apt install -y python3 python3-pip python3-venv
-
-# Check it worked — this should print a version like "Python 3.10.x"
-python3 --version
+python3 --version        # 3.9 or newer is fine
 ```
 
-## Step 3 (Linux) — Create the collector folder and copy the files
-
-We'll keep the collector in `/opt/olt-collector`.
+### 2. Create the folder and copy the files
 
 ```bash
-# Create the folder
 sudo mkdir -p /opt/olt-collector
+sudo chown -R www-data:www-data /opt/olt-collector
 
-# Make your user the owner so you can edit files without sudo every time
-sudo chown -R $USER:$USER /opt/olt-collector
-
-# Go into it
-cd /opt/olt-collector
+# Copy from the deployed project (adjust the path if yours differs)
+sudo cp /var/www/app/fttx/dev_resources/python/collector.py      /opt/olt-collector/
+sudo cp /var/www/app/fttx/dev_resources/python/requirements.txt  /opt/olt-collector/
+sudo cp /var/www/app/fttx/dev_resources/python/.env.example      /opt/olt-collector/.env
+sudo chown -R www-data:www-data /opt/olt-collector
 ```
 
-Now copy **`collector.py`**, **`requirements.txt`**, and **`.env.example`**
-(the files next to this README, inside `dev_resources/python/`) into
-`/opt/olt-collector/`.
-
-If your project code is already on the server, just copy them from there:
-
-```bash
-# Adjust the path to where your project lives on the server
-cp /var/www/fttx/dev_resources/python/collector.py        /opt/olt-collector/
-cp /var/www/fttx/dev_resources/python/requirements.txt    /opt/olt-collector/
-cp /var/www/fttx/dev_resources/python/.env.example        /opt/olt-collector/.env
-```
-
-## Step 4 (Linux) — Create the sandbox and install the libraries
-
-A "virtual environment" (venv) keeps these Python libraries separate from the
-rest of the system, so nothing else breaks.
+### 3. Create the sandbox (venv) and install the libraries
 
 ```bash
 cd /opt/olt-collector
-
-# Create the sandbox (a folder called "venv")
-python3 -m venv venv
-
-# Turn it on (your prompt will now start with "(venv)")
-source venv/bin/activate
-
-# Install the three libraries the collector needs
-pip install -r requirements.txt
+sudo -u www-data python3 -m venv venv
+sudo -u www-data ./venv/bin/pip install -r requirements.txt
 ```
 
-## Step 5 (Linux) — Set your secret key
-
-Open the `.env` file and set a long random password that Laravel will use to
-talk to the collector:
+### 4. Set the secret key
 
 ```bash
-# Generate a random key and see it
-openssl rand -hex 24
-
-# Open the file to edit it (nano is a simple editor)
-nano .env
+openssl rand -hex 24          # copy the printed value
+sudo nano /opt/olt-collector/.env
 ```
 
-In the editor, replace `change-me-to-a-long-random-string` with the random value
-you generated. Save with **Ctrl+O**, then **Enter**, then exit with **Ctrl+X**.
+Replace `change-me-to-a-long-random-string` with the value you copied.
+Save (**Ctrl+O**, **Enter**) and exit (**Ctrl+X**).
 
-Keep this key — you'll put the **same** value into Laravel's `.env` later.
-
-## Step 6 (Linux) — Test it by hand first
-
-Start the collector manually to make sure it runs:
-
-```bash
-cd /opt/olt-collector
-source venv/bin/activate     # if not already on
-uvicorn collector:app --host 127.0.0.1 --port 8800
-```
-
-You should see `Uvicorn running on http://127.0.0.1:8800`. Leave it running and
-**open a second SSH window** to test it:
-
-```bash
-# 1) Health check — should print {"status":"ok"}
-curl http://127.0.0.1:8800/health
-```
-
-Now the real test — **discovery**. This logs into your OLT and runs ONE command,
-returning the raw text. Replace the OLT details and the key:
-
-```bash
-curl -X POST http://127.0.0.1:8800/raw \
-  -H "Content-Type: application/json" \
-  -H "X-Collector-Key: PASTE-YOUR-KEY-HERE" \
-  -d '{
-        "host": "172.16.29.5",
-        "username": "admin",
-        "password": "OLT-PASSWORD",
-        "protocol": "telnet",
-        "command": "display version"
-      }'
-```
-
-- If you get text back from the OLT — **it works!** 🎉
-- Common fixes: wrong `protocol` (try `"ssh"` vs `"telnet"`), wrong port (add
-  `"port": 23`), or wrong `device_type` (add `"device_type": "generic_telnet"`).
-
-Stop the manual run with **Ctrl+C** when done — Step 7 makes it run permanently.
-
-## Step 7 (Linux) — Make it run automatically (as a service)
-
-So it starts on boot and restarts if it crashes:
-
-```bash
-# Copy the service template into place
-sudo cp /opt/olt-collector/olt-collector.service /etc/systemd/system/   # if you copied it here
-or sudo cp /var/www/app/fttx/dev_resources/python/olt-collector.service /etc/systemd/system/
-# (or copy it from your project: .../dev_resources/python/olt-collector.service)
-
-# IMPORTANT: open it and check the User= and paths match your server
-sudo nano /etc/systemd/system/olt-collector.service
-
-# Load and start it
-sudo systemctl daemon-reload
-sudo systemctl enable --now olt-collector
-
-# Check it's running (press Q to exit the status view)
-sudo systemctl status olt-collector
-```
-
-To see logs if something's wrong: `sudo journalctl -u olt-collector -n 50`.
-
-➡ **Now jump to "Discover the right commands" below.**
-
----
-
-# WINDOWS SERVER
-
-## Step 1 (Windows) — Install Python
-
-1. Download Python from <https://www.python.org/downloads/windows/> (get the
-   latest **3.12** "Windows installer 64-bit").
-2. Run the installer. On the first screen, **tick "Add python.exe to PATH"**,
-   then click **Install Now**.
-3. Open **PowerShell** (Start menu → type "PowerShell") and check:
-   ```powershell
-   python --version
-   ```
-
-## Step 2 (Windows) — Create the folder and copy files
-
-```powershell
-# Create a folder
-New-Item -ItemType Directory -Force C:\olt-collector
-cd C:\olt-collector
-```
-
-Copy `collector.py`, `requirements.txt`, and `.env.example` from the project's
-`dev_resources\python\` folder into `C:\olt-collector\`. Rename `.env.example`
-to `.env`.
-
-## Step 3 (Windows) — Sandbox + libraries
-
-```powershell
-cd C:\olt-collector
-python -m venv venv
-.\venv\Scripts\Activate.ps1      # prompt now shows "(venv)"
-pip install -r requirements.txt
-```
-
-> If `Activate.ps1` is blocked, run PowerShell **as Administrator** once and
-> execute: `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, then retry.
-
-## Step 4 (Windows) — Set your secret key
-
-Open `C:\olt-collector\.env` in Notepad and replace the key with any long random
-text. Save it. Remember this value for Laravel later.
-
-## Step 5 (Windows) — Test it
-
-```powershell
-cd C:\olt-collector
-.\venv\Scripts\Activate.ps1
-uvicorn collector:app --host 127.0.0.1 --port 8800
-```
-
-Leave it running, open a **second** PowerShell window and test:
-
-```powershell
-# Health
-curl http://127.0.0.1:8800/health
-
-# Discovery (replace OLT details + key). One line:
-curl -Method POST http://127.0.0.1:8800/raw -Headers @{ "X-Collector-Key" = "PASTE-YOUR-KEY" } -ContentType "application/json" -Body '{ "host":"172.16.29.5","username":"admin","password":"OLT-PASSWORD","protocol":"telnet","command":"display version" }'
-```
-
-Press **Ctrl+C** to stop.
-
-## Step 6 (Windows) — Run it permanently
-
-Easiest way is **NSSM** (a tiny tool that runs any program as a Windows service):
-
-1. Download NSSM from <https://nssm.cc/download>, unzip, copy `nssm.exe` to
-   `C:\olt-collector\`.
-2. In an **Administrator** PowerShell:
-   ```powershell
-   cd C:\olt-collector
-   .\nssm.exe install OltCollector "C:\olt-collector\venv\Scripts\uvicorn.exe" "collector:app --host 127.0.0.1 --port 8800"
-   .\nssm.exe set OltCollector AppDirectory "C:\olt-collector"
-   .\nssm.exe start OltCollector
-   ```
-3. It will now start automatically with Windows. Manage it in
-   **services.msc** (look for "OltCollector").
-
-➡ **Continue below.**
-
----
-
-# Discover the right commands (do this once per OLT model)
-
-Every OLT prints its tables a little differently. Before the parsed endpoints
-(`/onu/optical`, `/onu/mac`) can work, we need to see the **real output** once.
-
-Use the `/raw` endpoint to run the actual OLT commands and look at the text.
-Common **Huawei MA5600/MA5683T** commands to try:
-
-| Goal                | Command to put in `"command"`                          |
-|---------------------|--------------------------------------------------------|
-| Optical, one PON    | `display ont optical-info 0/1/0 all`                   |
-| Optical, one ONU    | `display ont optical-info 0/1/0 1`                     |
-| MAC, everything     | `display mac-address all`                              |
-| MAC, one ONU        | `display mac-address ont-id 0/1/0 1`                   |
-| ONU list on a port  | `display ont info 0/1/0 all`                           |
-
-> Tip: `0/1/0` means frame 0 / slot 1 / port 0. Use a slot/port that actually
-> has ONUs (check your ifName list — e.g. "GPON 0/1/0").
-
-Run one with `/raw` (see the test command in Step 6) and **copy the output**.
-
-- If the parsed `/onu/optical` or `/onu/mac` endpoints already return sensible
-  rows — you're done.
-- If not, **send the `/raw` output to your developer** (or paste it into
-  `dev_resources/debug/`). The parsing logic lives in the **PARSERS** section at
-  the bottom of `collector.py` and is easy to adjust to match your exact format.
-  After editing `collector.py`, restart the service:
-  - Linux: `sudo systemctl restart olt-collector`
-  - Windows: `.\nssm.exe restart OltCollector`
-
----
-
-# Connecting Laravel to the collector (for your developer)
-
-Once `/raw` works and the parsers are tuned, wire it into the app. Add to the
-Laravel `.env`:
+Put the **same** value into the Laravel `.env` (`/var/www/app/fttx/.env`):
 
 ```env
 OLT_COLLECTOR_URL=http://127.0.0.1:8800
-OLT_COLLECTOR_KEY=the-same-key-you-set-in-the-python-.env
+OLT_COLLECTOR_KEY=paste-the-same-key-here
+OLT_COLLECTOR_TIMEOUT=1500
 ```
 
-Then a thin service in Laravel calls it (example):
+### 5. Test it by hand once
 
-```php
-use Illuminate\Support\Facades\Http;
-
-$res = Http::withHeaders(['X-Collector-Key' => config('services.olt_collector.key')])
-    ->timeout(120)
-    ->post(config('services.olt_collector.url').'/onu/optical', [
-        'host' => $olt->ip_address,
-        'username' => $olt->ssh_username,
-        'password' => $olt->ssh_password,   // decrypted by the model cast
-        'protocol' => 'telnet',             // or 'ssh'
-        'frame_slot_port' => '0/1/0',
-        'ont_id' => 1,
-    ])->throw()->json();
-
-// $res['rows'] => [['ont_id'=>1,'rx_power'=>-18.55,'tx_power'=>2.31], ...]
+```bash
+cd /opt/olt-collector
+set -a; source .env; set +a
+./venv/bin/uvicorn collector:app --host 127.0.0.1 --port 8800
 ```
 
-The results can then be merged into the existing `OnuInfo` data during sync, so
-the rest of the app (dashboard, API) needs no changes. This is best run from a
-**queued job** (it's slower than SNMP), only for OLTs/firmwares where SNMP
-can't provide the data.
+You should see `Uvicorn running on http://127.0.0.1:8800`. In a **second**
+SSH window:
+
+```bash
+curl http://127.0.0.1:8800/health
+# → {"status":"ok","version":"2.0.0",...}
+```
+
+Then press **Ctrl+C** in the first window and continue with step 6.
+(The real OLT test is done from the app's **Diagnostics** page — no curl
+needed.)
+
+### 6. Run it permanently as a service
+
+```bash
+sudo cp /var/www/app/fttx/dev_resources/python/olt-collector.service /etc/systemd/system/
+sudo nano /etc/systemd/system/olt-collector.service   # check User= and the paths
+sudo systemctl daemon-reload
+sudo systemctl enable --now olt-collector
+sudo systemctl status olt-collector                   # press Q to exit
+```
+
+Logs: `sudo journalctl -u olt-collector -n 100 -f`
+
+### 7. Upgrading the collector later
+
+```bash
+sudo cp /var/www/app/fttx/dev_resources/python/collector.py /opt/olt-collector/
+sudo systemctl restart olt-collector
+```
 
 ---
 
-# Security checklist (important)
+## Windows server
 
-- ✅ The service listens on `127.0.0.1` only — never `0.0.0.0` in production.
-- ✅ A strong `COLLECTOR_API_KEY` is set in `.env` and required on every call.
-- ✅ The server's firewall does not expose port `8800` to the internet.
-- ✅ OLT credentials are sent per-request and not stored in the collector.
+1. Install Python 3.12 from <https://www.python.org/downloads/windows/>
+   (tick **"Add python.exe to PATH"**).
+2. Create `C:\olt-collector`, copy `collector.py`, `requirements.txt` and
+   `.env.example` (rename to `.env`) into it.
+3. In PowerShell:
+   ```powershell
+   cd C:\olt-collector
+   python -m venv venv
+   .\venv\Scripts\Activate.ps1
+   pip install -r requirements.txt
+   ```
+4. Edit `.env` and set `COLLECTOR_API_KEY`.
+5. Test: `uvicorn collector:app --host 127.0.0.1 --port 8800` then in another
+   window `curl http://127.0.0.1:8800/health`.
+6. Run as a service with NSSM (<https://nssm.cc/download>):
+   ```powershell
+   .\nssm.exe install OltCollector "C:\olt-collector\venv\Scripts\uvicorn.exe" "collector:app --host 127.0.0.1 --port 8800 --timeout-keep-alive 1800"
+   .\nssm.exe set OltCollector AppDirectory "C:\olt-collector"
+   .\nssm.exe set OltCollector AppEnvironmentExtra COLLECTOR_API_KEY=your-key COLLECTOR_JOB_TIMEOUT=1500
+   .\nssm.exe start OltCollector
+   ```
 
 ---
 
-# Quick troubleshooting
+## Using it from the app
 
-| Symptom                                   | Likely fix |
-|-------------------------------------------|------------|
-| `curl http://127.0.0.1:8800/health` fails | Service not running. Start it (Step 6/7) and check logs. |
-| `401 Bad or missing collector API key`    | The `X-Collector-Key` header doesn't match the `.env` key. |
-| `OLT connection/command failed`           | Wrong protocol/port/credentials. Try `"protocol":"ssh"` ↔ `"telnet"`, add `"port":23`, or `"device_type":"generic_telnet"`. |
-| `Pattern not detected: 'screen-length'`   | Old Huawei telnet firmware. Update `collector.py` (uses `huawei_olt_telnet` now) and `sudo systemctl restart olt-collector`. |
-| Output is only `display version` (no data) | Wrong telnet driver (`generic_telnet`). Update `collector.py` and restart — needs `huawei_olt_telnet`. |
-| `cURL error 28` / timed out after 120s    | Collector stuck on telnet prompt. Update `collector.py`, set `OLT_COLLECTOR_TIMEOUT=300` in Laravel `.env`, restart both services. |
-| Telnet logs in but output looks cut off   | Paging. The collector tries to disable it; some models need a different command — tell your developer the model. |
-| `ModuleNotFoundError`                      | The venv isn't active or libraries weren't installed. `source venv/bin/activate` then `pip install -r requirements.txt`. |
+1. **OLT → Edit → "CLI access"**: enter the OLT's CLI username/password,
+   choose **SSH or Telnet**, set the port (22/23), tick **Enable CLI
+   enrichment**, save.
+2. **Diagnostics page** (left menu): pick the OLT, tab **CLI command**, run
+   `display version` (Huawei) / `show version` (BDCOM, VSOL). The "CLI
+   collector" badge at the top must be green. The raw output appears below.
+3. Tab **CLI enrichment → Run** (dry run): shows what the parser extracted
+   (rx/tx/OLT-rx per ONT, MACs per ONT) next to the raw text. If the counts
+   look right, tick **Save** and run again, or just wait: the scheduler runs
+   `olt:cli-enrich --due` every minute and processes CLI-enabled OLTs on their
+   CLI interval (default 60 min).
+4. The OLT page shows a "CLI enrichment" status line and the ONU table marks
+   CLI-refreshed values with a small **CLI** tag.
+
+CLI command templates live in `config/olt.php` → `cli.vendors.<vendor>`; the
+parsers live in `app/Services/Olt/Cli/Profiles/`.
 
 ---
 
-*Files in this folder:* `collector.py` (the program), `requirements.txt`
-(libraries), `.env.example` (settings template), `olt-collector.service`
-(Linux auto-start template), `README.md` (this guide).
+## API (for developers)
+
+`POST /run` — header `X-Collector-Key: <key>`, JSON body:
+
+```json
+{
+  "host": "10.100.200.54", "username": "root", "password": "…",
+  "protocol": "telnet", "port": 23, "vendor": "huawei",
+  "prep": ["enable", "undo smart", "undo interactive", "scroll 512", "config"],
+  "commands": ["interface gpon 0/1", "display ont optical-info 0 all", "quit", "display mac-address port 0/1/0"],
+  "options": {"char_delay": 0.01, "command_timeout": 180, "login_timeout": 40, "prompt_regex": null}
+}
+```
+
+Response: `{"outputs":[{"command":"…","output":"…","error":null,"duration_ms":1234}, …],
+"prompt":"MA5683T(config)#","login_log":"…","duration_ms":…}`
+
+`GET /health` — liveness. `POST /raw` — v1-compatible single command.
+
+---
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| Badge says **collector offline** | `sudo systemctl status olt-collector`; `curl http://127.0.0.1:8800/health`; check `OLT_COLLECTOR_URL` in Laravel `.env`. |
+| `401 Bad or missing collector API key` | `OLT_COLLECTOR_KEY` (Laravel) ≠ `COLLECTOR_API_KEY` (collector `.env`). Restart both after changing. |
+| `OLT rejected the login` | Wrong CLI username/password on the OLT edit page, or the account has no CLI rights. |
+| `could not detect the CLI prompt` | Look at the *login / prep transcript* in the Diagnostics output; set `prompt_regex` in `config/olt.php` → `cli.vendors.<vendor>` if the prompt is unusual. |
+| Commands come back mangled over Telnet (`displayversion`) | The OLT drops characters typed too fast. Raise `char_delay` (Diagnostics → "Per-character delay", try `0.03`), then set it permanently in `config/olt.php` → `cli.vendors.<vendor>.char_delay`. |
+| `% Unknown command` for `display mac-address port …` | That firmware lacks the per-port form. Set `'use_mac_all' => true` in `config/olt.php` (uses `display mac-address all`). |
+| `504 OLT session exceeded …` | Raise `COLLECTOR_JOB_TIMEOUT` (collector `.env`) and `OLT_COLLECTOR_TIMEOUT` (Laravel `.env`), or use SSH instead of Telnet. |
+| SSH fails with `no matching key exchange` | Old OLT. The collector already enables legacy KEX/ciphers; make sure `paramiko` is 3.x (`./venv/bin/pip show paramiko`). |
+
+Run the local self-test any time: `python tests/test_collector.py` (uses a
+fake MA5683T telnet server, no hardware needed).

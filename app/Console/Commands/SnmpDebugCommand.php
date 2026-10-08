@@ -4,11 +4,14 @@ namespace App\Console\Commands;
 
 use App\Models\Olt;
 use App\Services\Snmp\SnmpClient;
+use App\Services\Snmp\SnmpProbeCatalog;
 use Illuminate\Console\Command;
 
 /**
  * Dumps raw SNMP walks from an OLT into dev_resources/debug/ so OID → value
  * mappings can be inspected and used to tune config/olt.php.
+ *
+ * The same probes are available from the browser on the Diagnostics page.
  *
  * Usage:
  *   php artisan olt:snmp-debug {olt_id}
@@ -34,19 +37,20 @@ class SnmpDebugCommand extends Command
 
         if ($olt->shouldSimulate()) {
             $this->error('This OLT is in simulation mode — no real SNMP to walk.');
+
             return 1;
         }
 
         $client = SnmpClient::forOlt($olt);
-        $limit  = (int) $this->option('limit');
+        $limit = (int) $this->option('limit');
 
         if ($customOid = $this->option('oid')) {
             $trees = ['Custom' => $customOid];
         } else {
-            $trees = $this->defaultTrees($olt->vendor);
+            $trees = SnmpProbeCatalog::all($olt->vendor);
         }
 
-        $lines   = [];
+        $lines = [];
         $lines[] = "SNMP Debug — OLT #{$olt->id} {$olt->name} ({$olt->ip_address})";
         $lines[] = "Vendor: {$olt->vendor}  Model: {$olt->model}";
         $lines[] = 'Generated: '.now()->toDateTimeString();
@@ -54,43 +58,19 @@ class SnmpDebugCommand extends Command
 
         foreach ($trees as $label => $baseOid) {
             $this->line("  Walking [{$label}]  {$baseOid} …");
-
-            $rows = $client->walk($baseOid);
-
             $lines[] = '';
-            $lines[] = "### {$label}";
-            $lines[] = "    Base OID : {$baseOid}";
-            $lines[] = '    Row count: '.count($rows);
-            $lines[] = '';
-
-            if (empty($rows)) {
-                $lines[] = '    (no data returned)';
-                continue;
-            }
-
-            $count = 0;
-            foreach ($rows as $index => $value) {
-                $lines[] = sprintf('    [%s]  =>  %s', $index, $value);
-                $count++;
-                if ($limit > 0 && $count >= $limit) {
-                    $remaining = count($rows) - $limit;
-                    if ($remaining > 0) {
-                        $lines[] = "    … {$remaining} more rows (increase --limit to see all)";
-                    }
-                    break;
-                }
-            }
+            $lines[] = self::renderWalk($client, $label, $baseOid, $limit);
         }
 
         $client->close();
 
-        $outDir  = base_path('dev_resources/debug');
+        $outDir = base_path('dev_resources/debug');
         if (! is_dir($outDir)) {
             mkdir($outDir, 0755, true);
         }
 
         $filename = "snmp_debug_olt{$olt->id}_".now()->format('Ymd_His').'.txt';
-        $path     = $outDir.DIRECTORY_SEPARATOR.$filename;
+        $path = $outDir.DIRECTORY_SEPARATOR.$filename;
 
         file_put_contents($path, implode("\n", $lines)."\n");
 
@@ -100,105 +80,43 @@ class SnmpDebugCommand extends Command
     }
 
     /**
-     * Return the OID trees most likely to contain ONU identity / optical data
-     * for the given vendor. Always includes a few generic/standard trees.
-     *
-     * For BDCOM, we walk each table column individually so the --limit applies
-     * per-column and we can read actual values instead of just the first column.
+     * Walk one subtree and render it as a text block (shared with the
+     * Diagnostics page so both produce identical dumps).
      */
-    private function defaultTrees(string $vendor): array
+    public static function renderWalk(SnmpClient $client, string $label, string $baseOid, int $limit = 20): string
     {
-        $common = [
-            'IF-MIB ifDescr (interface names)'  => '1.3.6.1.2.1.2.2.1.2',
-            'IF-MIB ifAlias (interface aliases)' => '1.3.6.1.2.1.31.1.1.1.18',
-        ];
+        $started = microtime(true);
+        $rows = $client->walk($baseOid);
+        $ms = (int) round((microtime(true) - $started) * 1000);
 
-        $vendorTrees = match (strtolower($vendor)) {
-            'bdcom' => [
-                // ONU base table columns (1.3.6.1.4.1.3320.10.3.3.1.COL)
-                'BDCOM base col.1  — ONU ifIndex'                => '1.3.6.1.4.1.3320.10.3.3.1.1',
-                'BDCOM base col.2  — (serial / GPON-ID?)'        => '1.3.6.1.4.1.3320.10.3.3.1.2',
-                'BDCOM base col.3  — (unknown)'                  => '1.3.6.1.4.1.3320.10.3.3.1.3',
-                'BDCOM base col.4  — run_status'                 => '1.3.6.1.4.1.3320.10.3.3.1.4',
-                'BDCOM base col.5  — (serial / password?)'       => '1.3.6.1.4.1.3320.10.3.3.1.5',
-                'BDCOM base col.6  — (unknown)'                  => '1.3.6.1.4.1.3320.10.3.3.1.6',
-                'BDCOM base col.7  — (uptime / online seconds?)' => '1.3.6.1.4.1.3320.10.3.3.1.7',
-                'BDCOM base col.8  — (unknown)'                  => '1.3.6.1.4.1.3320.10.3.3.1.8',
-                'BDCOM base col.9  — (unknown)'                  => '1.3.6.1.4.1.3320.10.3.3.1.9',
-                'BDCOM base col.10 — (unknown)'                  => '1.3.6.1.4.1.3320.10.3.3.1.10',
-                // ONU optical table columns (1.3.6.1.4.1.3320.10.3.4.1.COL)
-                'BDCOM optical col.1 — ONU ifIndex'              => '1.3.6.1.4.1.3320.10.3.4.1.1',
-                'BDCOM optical col.2 — rx_power'                 => '1.3.6.1.4.1.3320.10.3.4.1.2',
-                'BDCOM optical col.3 — tx_power'                 => '1.3.6.1.4.1.3320.10.3.4.1.3',
-                'BDCOM optical col.4 — (distance?)'              => '1.3.6.1.4.1.3320.10.3.4.1.4',
-                'BDCOM optical col.5 — (unknown)'                => '1.3.6.1.4.1.3320.10.3.4.1.5',
-                'BDCOM optical col.6 — (unknown)'                => '1.3.6.1.4.1.3320.10.3.4.1.6',
-                // Alternative bridge/MAC table
-                'BDCOM MAC bridge table (.3.5.1.*)'              => '1.3.6.1.4.1.3320.10.3.5.1',
-                // Standard bridge MIB — may hold learned CPE MACs
-                'dot1dTpFdbTable (bridge MAC table)'             => '1.3.6.1.2.1.17.4.3.1',
-            ],
-            'huawei' => [
-                // IF-MIB ifName — gives real port names (e.g. "GPON 0/0/0"). Run with --limit=0.
-                'ifName (real port names — use --limit=0)'           => '1.3.6.1.2.1.31.1.1.1.1',
+        $lines = [];
+        $lines[] = "### {$label}";
+        $lines[] = "    Base OID : {$baseOid}";
+        $lines[] = '    Row count: '.count($rows)."    ({$ms} ms)";
+        if ($client->lastError) {
+            $lines[] = '    Error    : '.$client->lastError;
+        }
+        $lines[] = '';
 
-                // ONU info table key columns
-                'Huawei .43.1.3 — serial number'                    => '1.3.6.1.4.1.2011.6.128.1.1.2.43.1.3',
-                'Huawei .43.1.9 — description'                      => '1.3.6.1.4.1.2011.6.128.1.1.2.43.1.9',
+        if (empty($rows)) {
+            $lines[] = '    (no data returned)';
 
-                // ONU control/status table
-                'Huawei .46.1.15 — run_status'                      => '1.3.6.1.4.1.2011.6.128.1.1.2.46.1.15',
-                'Huawei .46.1.20 — distance'                        => '1.3.6.1.4.1.2011.6.128.1.1.2.46.1.20',
-                'Huawei .46.1.23 — online_since (DateAndTime hex)'  => '1.3.6.1.4.1.2011.6.128.1.1.2.46.1.23',
-                // Optical DDM — hwGponOntOpticalDdmTable. CONFIRMED on MA5800
-                // V100R022: .51.1.3 = Tx, .51.1.4 = Rx (dBm×100). Returns 0 rows
-                // on MA5683T V800R018.
-                'Huawei .51.1.3 — Tx power (MA5800)'                => '1.3.6.1.4.1.2011.6.128.1.1.2.51.1.3',
-                'Huawei .51.1.4 — Rx power (MA5800)'                => '1.3.6.1.4.1.2011.6.128.1.1.2.51.1.4',
-                // ALTERNATE optical locations to probe on MA5683T / older firmware
-                // (run on the OLT whose .51 table is empty). Whichever returns
-                // negative ~ -8..-30 (rx) and small +1..+3 (tx) values is the one.
-                'Huawei alt .43.1.x — ONT info cols (scan 4..20)'   => '1.3.6.1.4.1.2011.6.128.1.1.2.43.1',
-                'Huawei alt .46.1.x — control cols (scan 1..30)'    => '1.3.6.1.4.1.2011.6.128.1.1.2.46.1',
-                'Huawei alt .102 — hwGponOntDdm? (probe)'           => '1.3.6.1.4.1.2011.6.128.1.1.2.102',
-                'Huawei alt .45 — ONT optical info? (probe)'        => '1.3.6.1.4.1.2011.6.128.1.1.2.45',
-            ],
-            'cdata' => [
-                // C-Data discovery probe. First learn the platform + how ONUs are
-                // exposed, then we map the optical/serial OIDs in config.
-                'sysObjectID (device model OID)'   => '1.3.6.1.2.1.1.2',
-                'sysDescr'                          => '1.3.6.1.2.1.1.1',
-                'ifName (port / ONU interface names — use --limit=0)' => '1.3.6.1.2.1.31.1.1.1.1',
-                'ifOperStatus (ONU online/offline)' => '1.3.6.1.2.1.2.2.1.8',
-                // C-Data enterprise roots — walk with a small limit to see which
-                // sub-tree carries ONU data on this model/firmware.
-                'C-Data ent 17409 ONU tree (probe)' => '1.3.6.1.4.1.17409.2',
-                'C-Data ent 34592 ONU tree (probe)' => '1.3.6.1.4.1.34592',
-            ],
-            'vsol' => [
-                // ONU online/offline always comes from IF-MIB (the VsolDriver spine).
-                'ifOperStatus (ONU online/offline)'  => '1.3.6.1.2.1.2.2.1.8',
+            return implode("\n", $lines);
+        }
 
-                // VSOL V1600G GPON tree (.6.1.1.*) — CONFIRMED on V2.1.16. All
-                // tables indexed by [ponIndex.onuIndex]. Use --limit=0 to see all.
-                //
-                // gOnuStaInfoTable (.6.1.1.1): col 5 phaseStatus, col 7 description
-                'VSOL sta phaseStatus  (.1.1.5)'  => '1.3.6.1.4.1.37950.1.1.6.1.1.1.1.5',
-                'VSOL sta description  (.1.1.7)'  => '1.3.6.1.4.1.37950.1.1.6.1.1.1.1.7',
-                // gOnuOpticalInfoTable (.6.1.1.3): col 6 txPwr, col 7 rxPwr, col 8 oltRxPwr
-                'VSOL optical txPwr    (.3.1.6)'  => '1.3.6.1.4.1.37950.1.1.6.1.1.3.1.6',
-                'VSOL optical rxPwr    (.3.1.7)'  => '1.3.6.1.4.1.37950.1.1.6.1.1.3.1.7',
-                'VSOL optical oltRxPwr (.3.1.8)'  => '1.3.6.1.4.1.37950.1.1.6.1.1.3.1.8',
-                // gOnuDetailInfoTable (.6.1.1.4): col 5 SN (CONFIRMED), 17 model, 24 desc
-                'VSOL detail SN        (.4.1.5)'  => '1.3.6.1.4.1.37950.1.1.6.1.1.4.1.5',
-                'VSOL detail model     (.4.1.17)' => '1.3.6.1.4.1.37950.1.1.6.1.1.4.1.17',
-                'VSOL detail desc      (.4.1.24)' => '1.3.6.1.4.1.37950.1.1.6.1.1.4.1.24',
-                // gOnuAuthInfoTable (.6.1.1.2): col 5 authInfo (configured SN/pw)
-                'VSOL auth authInfo    (.2.1.5)'  => '1.3.6.1.4.1.37950.1.1.6.1.1.2.1.5',
-            ],
-            default => [],
-        };
+        $count = 0;
+        foreach ($rows as $index => $value) {
+            $lines[] = sprintf('    [%s]  =>  %s', $index, $value);
+            $count++;
+            if ($limit > 0 && $count >= $limit) {
+                $remaining = count($rows) - $limit;
+                if ($remaining > 0) {
+                    $lines[] = "    … {$remaining} more rows (increase the limit to see all)";
+                }
+                break;
+            }
+        }
 
-        return array_merge($common, $vendorTrees);
+        return implode("\n", $lines);
     }
 }

@@ -3,6 +3,7 @@
 use App\Livewire\ApiClients;
 use App\Livewire\Auth\Login;
 use App\Livewire\Dashboard;
+use App\Livewire\Diagnostics;
 use App\Livewire\Olts;
 use App\Livewire\Onus;
 use App\Livewire\Roles;
@@ -36,6 +37,10 @@ Route::middleware('auth')->group(function () {
         ->middleware('permission:olt.create')->name('olts.create');
     Route::get('/olts/{olt}/edit', Olts\Manage::class)
         ->middleware('permission:olt.update')->name('olts.edit');
+
+    // Diagnostics (SNMP walks / CLI commands against a live OLT)
+    Route::get('/diagnostics', Diagnostics\Index::class)
+        ->middleware('permission:olt.diagnose')->name('diagnostics.index');
 
     // ONUs
     Route::get('/onus', Onus\Index::class)

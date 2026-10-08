@@ -1,6 +1,6 @@
-# Python packages for the OLT SSH/Telnet collector.
+# Python packages for the OLT SSH/Telnet collector (v2).
 # Install with:  pip install -r requirements.txt
 
-netmiko==4.4.0        # SSH/Telnet to network devices (handles prompts, paging)
-fastapi==0.115.6      # the small web API framework
+paramiko==3.5.1            # SSH (the collector has its own tiny Telnet client)
+fastapi==0.115.6           # the small web API framework
 uvicorn[standard]==0.34.0  # the web server that runs the FastAPI app

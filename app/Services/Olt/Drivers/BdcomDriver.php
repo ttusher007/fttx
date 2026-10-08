@@ -9,6 +9,10 @@ use App\Services\Snmp\SnmpClient;
 
 /**
  * BDCOM EPON/GPON OLTs (P3310, P3608, GP3600, etc.).
+ *
+ * Every ONU is an IF-MIB interface ("GPON0/1:5" / "EPON0/2:17"), and the vendor
+ * tables are indexed by that ONU ifIndex. Customer MACs come from the bridge
+ * FDB (NMS-MAC-MIB fdbReadByPortTable), joined on the same ifIndex.
  */
 class BdcomDriver extends AbstractVendorDriver
 {
@@ -44,12 +48,13 @@ class BdcomDriver extends AbstractVendorDriver
             };
         }
 
-        // EPON: 1=up, 2=down, 3=los
+        // EPON nmsepononuTable onuStatus: 0 authenticated, 1 registered,
+        // 2 deregistered, 3 auto_config, 4 lost, 5 standby.
         return match ($value) {
-            1 => OnuStatus::Online,
-            2 => OnuStatus::Offline,
-            3 => OnuStatus::Losi,
-            default => OnuStatus::Offline,
+            0, 1, 3 => OnuStatus::Online,
+            2, 5 => OnuStatus::Offline,
+            4 => OnuStatus::Losi,
+            default => OnuStatus::Unknown,
         };
     }
 
@@ -65,8 +70,8 @@ class BdcomDriver extends AbstractVendorDriver
             return $onus;
         }
 
-        // GP3600 status table includes PON ifIndexes — keep only real ONU interfaces.
-        if ($this->usesGponOids()) {
+        // Vendor tables sometimes include PON-port rows — keep only real ONU interfaces.
+        if (! empty($onuToPort)) {
             $onus = array_values(array_filter(
                 $onus,
                 fn (OnuInfo $onu) => isset($onuToPort[$onu->onuIndex]),
@@ -74,22 +79,13 @@ class BdcomDriver extends AbstractVendorDriver
         }
 
         return array_map(function (OnuInfo $onu) use ($onuToPort, $onuNames) {
-            $portIndex = $onuToPort[$onu->onuIndex] ?? $onu->portIndex;
             $name = $onuNames[$onu->onuIndex] ?? null;
 
-            return new OnuInfo(
-                onuIndex: $onu->onuIndex,
-                portIndex: $portIndex,
-                serialNumber: $onu->serialNumber,
-                macAddress: $onu->macAddress,
-                name: $name,
-                description: $onu->description ?: $name,
-                status: $onu->status,
-                rxPower: $onu->rxPower,
-                txPower: $onu->txPower,
-                distance: $onu->distance,
-                onlineSince: $onu->onlineSince,
-            );
+            return $onu->with([
+                'portIndex' => $onuToPort[$onu->onuIndex] ?? $onu->portIndex,
+                'name' => $name,
+                'description' => $onu->description ?: $name,
+            ]);
         }, $onus);
     }
 

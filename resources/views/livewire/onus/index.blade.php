@@ -27,7 +27,7 @@
                     <th class="px-4 py-3">PON Port</th>
                     <th class="px-4 py-3">ONU Port</th>
                     <th class="px-4 py-3">Status</th>
-                    <th class="px-4 py-3">↓OLT→ONU / ↑ONU→OLT</th>
+                    <th class="px-4 py-3" title="ONU Rx / ONU Tx / OLT Rx (dBm)">↓ONU Rx / ↑ONU Tx · OLT Rx</th>
                     <th class="px-4 py-3">Live since</th>
                     <th class="px-4 py-3"></th>
                 </tr>
@@ -37,7 +37,8 @@
                     <tr wire:key="o-{{ $onu->id }}" class="hover:bg-slate-50">
                         <td class="px-4 py-3">
                             <p class="font-medium text-slate-800">{{ $onu->serial_number ?: '—' }}</p>
-                            <p class="text-xs text-slate-400">{{ $onu->mac_address ?: 'no MAC' }}</p>
+                            <p class="text-xs text-slate-400"><span title="Customer router MAC{{ $onu->mac_source ? ' (via '.$onu->mac_source.')' : '' }}">{{ $onu->mac_address ?: 'no router MAC' }}</span>@if($onu->mac_count && $onu->mac_count > 1) <span class="rounded bg-slate-100 px-1 text-[10px]">+{{ $onu->mac_count - 1 }}</span>@endif</p>
+                            @if ($onu->model || $onu->onu_mac)<p class="text-[11px] text-slate-400">{{ $onu->model }}@if($onu->model && $onu->onu_mac) · @endif<span title="ONU's own MAC">{{ $onu->onu_mac }}</span></p>@endif
                         </td>
                         <td class="px-4 py-3">
                             <a href="{{ route('olts.show', $onu->olt_id) }}" wire:navigate class="text-indigo-600 hover:text-indigo-500">{{ $onu->olt?->name }}</a>
@@ -63,7 +64,8 @@
                     <div class="flex items-start justify-between gap-2">
                         <div class="min-w-0">
                             <p class="truncate font-medium text-slate-800">{{ $onu->serial_number ?: '—' }}</p>
-                            <p class="truncate text-xs text-slate-400">{{ $onu->mac_address ?: 'no MAC' }}</p>
+                            <p class="truncate text-xs text-slate-400">{{ $onu->mac_address ?: 'no router MAC' }}@if($onu->mac_count && $onu->mac_count > 1) +{{ $onu->mac_count - 1 }}@endif</p>
+                            @if ($onu->model || $onu->onu_mac)<p class="truncate text-[11px] text-slate-400">{{ $onu->model }}@if($onu->model && $onu->onu_mac) · @endif{{ $onu->onu_mac }}</p>@endif
                         </div>
                         <x-badge :color="$onu->status->color()">{{ $onu->status->label() }}</x-badge>
                     </div>

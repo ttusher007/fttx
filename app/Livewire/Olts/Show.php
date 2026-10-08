@@ -3,6 +3,7 @@
 namespace App\Livewire\Olts;
 
 use App\Enums\SyncStatus;
+use App\Jobs\EnrichOltCliJob;
 use App\Jobs\SyncOnuJob;
 use App\Models\Olt;
 use App\Models\SyncLog;
@@ -86,6 +87,20 @@ class Show extends Component
         $result = $tester->test($this->olt);
         $this->connectionTestSuccess = $result['success'];
         $this->connectionTestMessage = $result['message'];
+    }
+
+    public function runCliEnrich(): void
+    {
+        Gate::authorize('olt.sync');
+
+        if (! $this->olt->cliConfigured()) {
+            session()->flash('status', 'CLI enrichment is not configured: enable it and set the CLI username/password on the Edit page.');
+
+            return;
+        }
+
+        EnrichOltCliJob::dispatch($this->olt->id, 'manual', auth()->id());
+        session()->flash('status', 'CLI enrichment queued — optical power and customer MACs will be refreshed over '.strtoupper($this->olt->cli_protocol ?? 'ssh').' (this takes a few minutes).');
     }
 
     public function syncOnu(int $onuId): void

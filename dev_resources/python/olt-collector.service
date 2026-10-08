@@ -7,7 +7,7 @@
 #       sudo systemctl enable --now olt-collector
 #       sudo systemctl status olt-collector
 #
-# See README.md "Step 7 (Linux)" for the full walk-through.
+# See README.md for the full walk-through.
 
 [Unit]
 Description=OLT SSH/Telnet Collector (FTTX)
@@ -20,9 +20,10 @@ Type=simple
 # non-root user that owns the folder is fine.
 User=www-data
 WorkingDirectory=/opt/olt-collector
-# Loads COLLECTOR_API_KEY etc. from the .env file.
+# Loads COLLECTOR_API_KEY, COLLECTOR_JOB_TIMEOUT etc. from the .env file.
 EnvironmentFile=/opt/olt-collector/.env
-ExecStart=/opt/olt-collector/venv/bin/uvicorn collector:app --host 127.0.0.1 --port 8800
+# --timeout-keep-alive must exceed the longest OLT session (see COLLECTOR_JOB_TIMEOUT).
+ExecStart=/opt/olt-collector/venv/bin/uvicorn collector:app --host 127.0.0.1 --port 8800 --timeout-keep-alive 1800 --workers 2
 Restart=always
 RestartSec=3
 

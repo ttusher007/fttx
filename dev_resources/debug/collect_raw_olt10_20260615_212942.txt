@@ -1,0 +1,3 @@
+{
+    "output": "### display version\ndisplayversion\n       ^\n  % Unknown command, the error locates at '^'\n\nDU-OLT>"
+}

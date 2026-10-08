@@ -1,0 +1,3 @@
+{
+    "output": "### display version\n{ <cr>|backplane<K>|frameid/slotid<S><Length 1-15> }:\n! FAULT MINOR 2026-06-15 21:03:54+06:00\n  ALARM NAME :The dying-gasp of GPON ONTi (DGi) is generated\n  PARAMETERS :FrameID: 0, SlotID: 0, PortID: 5, ONT ID: 19, Equipment ID: \n  310M\n"
+}

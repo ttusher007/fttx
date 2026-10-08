@@ -98,22 +98,43 @@
             </div>
         </div>
 
-        {{-- SSH (optional) --}}
+        {{-- CLI (SSH / Telnet) enrichment --}}
         <div class="card p-5">
-            <h3 class="mb-1 text-sm font-semibold text-slate-700">SSH (optional fallback)</h3>
-            <p class="mb-4 text-xs text-slate-400">Used only for vendor actions SNMP can't perform. Sync uses SNMP.</p>
+            <h3 class="mb-1 text-sm font-semibold text-slate-700">CLI access (SSH / Telnet)</h3>
+            <p class="mb-4 text-xs text-slate-400">
+                Sync always uses SNMP. Enable CLI enrichment for OLTs whose firmware does not expose optical power or customer MACs over SNMP
+                (e.g. Huawei MA5683T V800R018): the app logs in through the local collector service on its own schedule and fills those fields in.
+            </p>
             <div class="grid grid-cols-1 gap-4 sm:grid-cols-3">
                 <div>
                     <label class="label">Username</label>
-                    <input wire:model="ssh_username" class="input">
+                    <input wire:model="ssh_username" class="input" autocomplete="off">
+                </div>
+                <div>
+                    <label class="label">Password</label>
+                    <input wire:model="ssh_password" type="password" class="input" autocomplete="new-password" placeholder="{{ $olt ? 'unchanged' : '' }}">
+                </div>
+                <div>
+                    <label class="label">Protocol</label>
+                    <select wire:model="cli_protocol" class="input">
+                        <option value="ssh">SSH</option>
+                        <option value="telnet">Telnet</option>
+                    </select>
                 </div>
                 <div>
                     <label class="label">Port</label>
                     <input wire:model="ssh_port" type="number" class="input">
+                    <p class="mt-1 text-xs text-slate-400">22 for SSH, 23 for Telnet.</p>
                 </div>
                 <div>
-                    <label class="label">Password</label>
-                    <input wire:model="ssh_password" type="password" class="input" placeholder="{{ $olt ? 'unchanged' : '' }}">
+                    <label class="label">CLI interval (min)</label>
+                    <input wire:model="cli_interval" type="number" min="5" class="input" placeholder="{{ config('olt.cli.default_interval', 60) }}">
+                </div>
+                <div class="flex items-end">
+                    <label class="flex items-center gap-2 text-sm text-slate-600">
+                        <input wire:model="cli_enabled" type="checkbox" class="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500">
+                        Enable CLI enrichment
+                    </label>
                 </div>
             </div>
         </div>
